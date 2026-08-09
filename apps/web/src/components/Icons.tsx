@@ -214,6 +214,22 @@ export const GrokIcon: Icon = ({ className, ...props }) => (
   </svg>
 );
 
+export const OmpIcon: Icon = ({ className, ...props }) => (
+  <svg
+    {...props}
+    viewBox="0 0 24 24"
+    fill="none"
+    className={cn("fill-[#0F0F0F] dark:fill-[#F5F5F5]", className)}
+  >
+    <path
+      fillRule="evenodd"
+      clipRule="evenodd"
+      d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm0 3a7 7 0 1 1 0 14 7 7 0 0 1 0-14Z"
+    />
+    <path d="M12 6.5a.9.9 0 0 1 .9.9v5.2c0 .5-.4.9-.9.9s-.9-.4-.9-.9V7.4c0-.5.4-.9.9-.9Z" />
+  </svg>
+);
+
 export const TraeIcon: Icon = (props) => (
   <svg {...props} viewBox="0 0 24 24" fill="currentColor">
     {/* Back rectangle: left strip + bottom strip drawn separately — empty bottom-left corner is the gap between them */}
