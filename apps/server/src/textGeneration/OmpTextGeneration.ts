@@ -234,6 +234,7 @@ export const makeOmpTextGeneration = Effect.fn("makeOmpTextGeneration")(function
     Effect.fn("OmpTextGeneration.generateThreadTitle")(function* (input) {
       const { prompt, outputSchema } = buildThreadTitlePrompt({
         message: input.message,
+        previousTitle: input.previousTitle,
         attachments: input.attachments,
       });
 
