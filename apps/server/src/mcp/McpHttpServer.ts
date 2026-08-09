@@ -37,6 +37,23 @@ const unauthorized = HttpServerResponse.jsonUnsafe(
   },
 );
 
+/**
+ * omp's ACP-integrated MCP client (Bun) speaks the 2025-03-26 streamable-HTTP
+ * dialect: it never sends the `MCP-Protocol-Version` header, and the server's
+ * version-header enforcement (`requiresVersionHeader`) answers those requests
+ * with 400, which makes omp abort the whole ACP session. The message shapes
+ * between 2025-03-26 and 2025-06-18 are identical for this server's surface,
+ * so reuse the 2025-06-18 schema set with the legacy transport options.
+ */
+const McpProtocolOmpCompat = {
+  ...McpProtocol.v2025_06_18,
+  protocolVersion: "2025-03-26",
+  transport: {
+    acceptsJsonRpcBatches: false,
+    requiresVersionHeader: false,
+  },
+} as unknown as McpProtocol.ProtocolAdapter;
+
 type AuthenticatedHttpEffect = Effect.Effect<
   HttpServerResponse.HttpServerResponse,
   Types.unhandled,
@@ -220,7 +237,7 @@ const McpTransportLive = McpServer.layerHttp({
   name: "T3 Code",
   version: packageJson.version,
   path: "/mcp",
-  protocols: [McpProtocol.v2025_06_18],
+  protocols: [McpProtocolOmpCompat, McpProtocol.v2025_06_18],
 }).pipe(Layer.provide(McpAuthMiddlewareLive));
 
 export const layer = PreviewToolkitRegistrationLive.pipe(Layer.provideMerge(McpTransportLive));
