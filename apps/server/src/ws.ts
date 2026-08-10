@@ -1052,44 +1052,70 @@ const makeWsRpcLayer = (
             }
 
             if (bootstrap?.prepareWorktree) {
-              let worktreeBaseRef = bootstrap.prepareWorktree.baseBranch;
-              // "Start from origin" is a stored default; repos without an
-              // origin remote fall back to the local base branch instead of
-              // failing the whole bootstrap on `git fetch origin`.
-              const startFromOrigin =
-                bootstrap.prepareWorktree.startFromOrigin === true &&
-                (yield* gitWorkflow.remoteExists({
-                  cwd: bootstrap.prepareWorktree.projectCwd,
-                  remoteName: "origin",
-                }));
-              if (startFromOrigin) {
-                yield* gitWorkflow.fetchRemote({
-                  cwd: bootstrap.prepareWorktree.projectCwd,
-                  remoteName: "origin",
+              const prepareWorktree = bootstrap.prepareWorktree;
+              const projectCwd = prepareWorktree.projectCwd;
+              const worktreePath = yield* Effect.gen(function* () {
+                let worktreeBaseRef = prepareWorktree.baseBranch;
+                // "Start from origin" is a stored default; repos without an
+                // origin remote fall back to the local base branch instead of
+                // failing the whole bootstrap on `git fetch origin`.
+                const startFromOrigin =
+                  prepareWorktree.startFromOrigin === true &&
+                  (yield* gitWorkflow.remoteExists({
+                    cwd: projectCwd,
+                    remoteName: "origin",
+                  }));
+                if (startFromOrigin) {
+                  yield* gitWorkflow.fetchRemote({
+                    cwd: projectCwd,
+                    remoteName: "origin",
+                  });
+                  const resolvedRemoteBase = yield* gitWorkflow.resolveRemoteTrackingCommit({
+                    cwd: projectCwd,
+                    refName: prepareWorktree.baseBranch,
+                    fallbackRemoteName: "origin",
+                  });
+                  worktreeBaseRef = resolvedRemoteBase.commitSha;
+                }
+                const worktree = yield* gitWorkflow.createWorktree({
+                  cwd: projectCwd,
+                  refName: worktreeBaseRef,
+                  newRefName: prepareWorktree.branch,
+                  baseRefName: prepareWorktree.baseBranch,
+                  path: null,
                 });
-                const resolvedRemoteBase = yield* gitWorkflow.resolveRemoteTrackingCommit({
-                  cwd: bootstrap.prepareWorktree.projectCwd,
-                  refName: bootstrap.prepareWorktree.baseBranch,
-                  fallbackRemoteName: "origin",
+                return worktree.worktree.path;
+              }).pipe(
+                Effect.catch((error: unknown) =>
+                  Effect.gen(function* () {
+                    // Worktree setup is best-effort: a project workspace that
+                    // is not a usable git repository (e.g. a home folder
+                    // initialized by mistake) must not prevent the turn from
+                    // starting. Continue as a bare thread instead.
+                    yield* Effect.logWarning(
+                      "bootstrap worktree setup failed; continuing as bare thread",
+                      {
+                        threadId: command.threadId,
+                        projectCwd,
+                        error: String(error),
+                      },
+                    );
+                    return undefined;
+                  }),
+                ),
+              );
+              if (worktreePath !== undefined) {
+                targetWorktreePath = worktreePath;
+                yield* orchestrationEngine.dispatch({
+                  type: "thread.meta.update",
+                  commandId: yield* serverCommandId("bootstrap-thread-meta-update"),
+                  threadId: command.threadId,
+                  branch: prepareWorktree.branch,
+                  worktreePath,
                 });
-                worktreeBaseRef = resolvedRemoteBase.commitSha;
+                yield* refreshGitStatus(worktreePath);
               }
-              const worktree = yield* gitWorkflow.createWorktree({
-                cwd: bootstrap.prepareWorktree.projectCwd,
-                refName: worktreeBaseRef,
-                newRefName: bootstrap.prepareWorktree.branch,
-                baseRefName: bootstrap.prepareWorktree.baseBranch,
-                path: null,
-              });
-              targetWorktreePath = worktree.worktree.path;
-              yield* dispatchFromClient({
-                type: "thread.meta.update",
-                commandId: yield* serverCommandId("bootstrap-thread-meta-update"),
-                threadId: command.threadId,
-                branch: worktree.worktree.refName,
-                worktreePath: targetWorktreePath,
-              });
-              yield* refreshGitStatus(targetWorktreePath);
+
             }
 
             yield* runSetupProgram();
