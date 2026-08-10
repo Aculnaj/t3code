@@ -673,6 +673,13 @@ const make = Effect.gen(function* () {
       return;
     }
 
+    // Bare threads have no worktree to snapshot; capturing against the project
+    // workspace can stall git on huge or non-repository directories (a home
+    // folder turned into a repo).
+    if (thread.worktreePath === null) {
+      return;
+    }
+
     const projects = yield* resolveThreadProjects(thread.projectId);
     const checkpointCwd = yield* resolveCheckpointCwd({
       threadId,
