@@ -1517,39 +1517,66 @@ const makeWsRpcLayer = (
                       ),
                   },
                 },
+              ).pipe(
+                Effect.catchCause((cause) =>
+                  prepareWorktree.requireWorktree
+                    ? Effect.failCause(cause)
+                    : Effect.gen(function* () {
+                        // Worktree setup is best-effort: a project workspace that
+                        // is not a usable git repository (e.g. a home folder
+                        // initialized by mistake) must not prevent the turn from
+                        // starting. Continue as a bare thread instead.
+                        yield* Effect.logWarning(
+                          "bootstrap worktree setup failed; continuing as bare thread",
+                          {
+                            threadId,
+                            projectCwd: prepareWorktree.projectCwd,
+                          },
+                        );
+                        yield* worktreeSetupTracker.stageStatus(
+                          threadId,
+                          "checkout",
+                          "warning",
+                          "worktree setup failed, continuing without one",
+                        );
+                        return null;
+                      }),
+                ),
               );
-              const checkoutEndedAt = yield* nowIso;
-              yield* worktreeSetupTracker.update(threadId, (snapshot) => ({
-                ...snapshot,
-                worktreePath: worktree.worktree.path,
-                stages: snapshot.stages.map((stage) => {
-                  if (stage.id === "checkout" && stage.status === "running") {
-                    return {
-                      ...stage,
-                      status: "done",
-                      percent: 100,
-                      endedAt: checkoutEndedAt,
-                      detail:
-                        checkoutTotal === null
-                          ? stage.detail
-                          : `${checkoutTotal.toLocaleString("en-US")} files`,
-                    };
-                  }
-                  if (stage.id === "submodules" && stage.status === "pending") {
-                    return { ...stage, status: "skipped", detail: "none" };
-                  }
-                  return stage;
-                }),
-              }));
-              targetWorktreePath = worktree.worktree.path;
-              yield* dispatchFromClient({
-                type: "thread.meta.update",
-                commandId: yield* serverCommandId("bootstrap-thread-meta-update"),
-                threadId,
-                branch: worktree.worktree.refName,
-                worktreePath: targetWorktreePath,
-              });
-              yield* refreshGitStatus(targetWorktreePath);
+              if (worktree !== null) {
+                const checkoutEndedAt = yield* nowIso;
+                yield* worktreeSetupTracker.update(threadId, (snapshot) => ({
+                  ...snapshot,
+                  worktreePath: worktree.worktree.path,
+                  stages: snapshot.stages.map((stage) => {
+                    if (stage.id === "checkout" && stage.status === "running") {
+                      return {
+                        ...stage,
+                        status: "done",
+                        percent: 100,
+                        endedAt: checkoutEndedAt,
+                        detail:
+                          checkoutTotal === null
+                            ? stage.detail
+                            : `${checkoutTotal.toLocaleString("en-US")} files`,
+                      };
+                    }
+                    if (stage.id === "submodules" && stage.status === "pending") {
+                      return { ...stage, status: "skipped", detail: "none" };
+                    }
+                    return stage;
+                  }),
+                }));
+                targetWorktreePath = worktree.worktree.path;
+                yield* dispatchFromClient({
+                  type: "thread.meta.update",
+                  commandId: yield* serverCommandId("bootstrap-thread-meta-update"),
+                  threadId,
+                  branch: worktree.worktree.refName,
+                  worktreePath: targetWorktreePath,
+                });
+                yield* refreshGitStatus(targetWorktreePath);
+              }
             }
 
             const pendingSetupScript = yield* runSetupProgram();
