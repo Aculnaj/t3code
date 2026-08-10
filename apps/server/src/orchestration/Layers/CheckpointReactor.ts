@@ -402,6 +402,14 @@ const make = Effect.gen(function* () {
         return;
       }
 
+      // Checkpoints are git snapshots of the thread's worktree. Bare threads
+      // (no worktree) keep their state in the provider's own session; capturing
+      // against the project workspace instead can stall git on huge or
+      // non-repository directories (a home folder turned into a repo).
+      if (thread.worktreePath === null) {
+        return;
+      }
+
       // When a primary turn is active, only that turn may produce completion checkpoints.
       if (thread.session?.activeTurnId && !sameId(thread.session.activeTurnId, turnId)) {
         return;
@@ -458,6 +466,7 @@ const make = Effect.gen(function* () {
     },
   );
 
+
   const ensurePreTurnBaselineFromTurnStart = Effect.fn("ensurePreTurnBaselineFromTurnStart")(
     function* (event: Extract<ProviderRuntimeEvent, { type: "turn.started" }>) {
       const turnId = toTurnId(event.turnId);
@@ -467,6 +476,14 @@ const make = Effect.gen(function* () {
 
       const thread = yield* resolveThreadDetail(event.threadId);
       if (!thread) {
+        return;
+      }
+
+      // Checkpoints are git snapshots of the thread's worktree. Bare threads
+      // (no worktree) keep their state in the provider's own session; capturing
+      // against the project workspace instead can stall git on huge or
+      // non-repository directories (a home folder turned into a repo).
+      if (thread.worktreePath === null) {
         return;
       }
 
