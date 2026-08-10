@@ -8,6 +8,7 @@
  */
 import * as Schema from "effect/Schema";
 import * as Effect from "effect/Effect";
+import * as SchemaTransformation from "effect/SchemaTransformation";
 import { limitTitleMessage } from "./ThreadTitleContext.ts";
 import type { ChatAttachment } from "@t3tools/contracts";
 
@@ -15,6 +16,22 @@ import { limitSection } from "./TextGenerationUtils.ts";
 import type { TextGenerationPolicy } from "./TextGenerationPolicy.ts";
 
 const EARLIER_CONTENT_TRUNCATION_MARKER = "[Earlier content truncated]\n\n";
+
+/**
+ * Body fields accept a single string or an array of bullet lines. Models
+ * (notably deepseek-v4-flash via the OMP/OpenCode text-generation backends)
+ * frequently emit `body` as a JSON array; normalize it to newline-joined text
+ * so one generation style does not fail the whole decode.
+ */
+const NormalizedBody = Schema.Union([Schema.String, Schema.Array(Schema.String)]).pipe(
+  Schema.decodeTo(
+    Schema.String,
+    SchemaTransformation.transform<string, string | ReadonlyArray<string>>({
+      decode: (value) => (typeof value === "string" ? value : value.join("\n")),
+      encode: (value) => value,
+    }),
+  ),
+);
 
 function policyInstruction(instruction: string | undefined): ReadonlyArray<string> {
   const trimmed = instruction?.trim();
@@ -43,7 +60,7 @@ export function buildCommitMessagePrompt(input: CommitMessagePromptInput) {
       : "Return a JSON object with keys: subject, body.",
     "Rules:",
     "- subject must be imperative, <= 72 chars, and no trailing period",
-    "- body can be empty string or short bullet points",
+    "- body can be empty string or short bullet points, as a single string with newlines (never a JSON array)",
     ...(wantsBranch
       ? ["- branch must be a short semantic git branch fragment for this change"]
       : []),
@@ -64,7 +81,7 @@ export function buildCommitMessagePrompt(input: CommitMessagePromptInput) {
       prompt,
       outputSchema: Schema.Struct({
         subject: Schema.String,
-        body: Schema.String,
+        body: NormalizedBody,
         branch: Schema.String,
       }),
     };
@@ -74,7 +91,7 @@ export function buildCommitMessagePrompt(input: CommitMessagePromptInput) {
     prompt,
     outputSchema: Schema.Struct({
       subject: Schema.String,
-      body: Schema.String,
+      body: NormalizedBody,
     }),
   };
 }
@@ -101,11 +118,13 @@ export function buildPrContentPrompt(input: PrContentPromptInput) {
         "- fill in the template sections appropriately for this change",
         "- drop HTML comments from the template in the generated body",
         "- keep the template's markdown structure",
+        "- body is a single string, never a JSON array",
       ]
     : [
         "- body must be markdown and include headings '## Summary' and '## Testing'",
         "- under Summary, provide short bullet points",
         "- under Testing, include bullet points with concrete checks or 'Not run' where appropriate",
+        "- body is a single string, never a JSON array",
       ];
   const prompt = [
     "You write source control change request content.",
@@ -133,7 +152,7 @@ export function buildPrContentPrompt(input: PrContentPromptInput) {
 
   const outputSchema = Schema.Struct({
     title: Schema.String,
-    body: Schema.String,
+    body: NormalizedBody,
   });
 
   return { prompt, outputSchema };
