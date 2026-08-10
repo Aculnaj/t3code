@@ -11,6 +11,8 @@
  *
  * @module UsageService
  */
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 
 import {
@@ -229,6 +231,10 @@ export const make = Effect.gen(function* () {
         ? path.resolve(expandHomePath(grokHomeEnv))
         : path.join(NodeOS.homedir(), ".grok");
 
+    // omp and opencode have no per-provider home override in server settings;
+    // they always live under the running user's home directory.
+    const homePath = NodeOS.homedir();
+
     return [
       { provider: "claude" as const, dir: claudeDir },
       { provider: "codex" as const, dir: path.join(codexLayout.sharedHomePath, "sessions") },
@@ -237,6 +243,8 @@ export const make = Effect.gen(function* () {
         dir: path.join(grokHome, "sessions"),
         fileName: "updates.jsonl",
       },
+      { provider: "omp" as const, dir: path.join(homePath, ".omp", "agent", "sessions") },
+      { provider: "opencode" as const, dir: path.join(homePath, ".local", "share", "opencode") },
     ];
   });
 
@@ -383,6 +391,66 @@ export const make = Effect.gen(function* () {
           malformedRecords: 0,
           distinctSessions: 0,
           message: "No transcript directory on this environment.",
+        });
+        continue;
+      }
+
+      // opencode persists its session log in a single SQLite database rather
+      // than per-session JSONL, so the JSONL walk below does not apply to it.
+      if (provider === "opencode") {
+        const dbPath = path.join(dir, "opencode.db");
+        const dbExists = yield* fileSystem
+          .exists(dbPath)
+          .pipe(Effect.catchCause(() => Effect.succeed(false)));
+        if (!dbExists) {
+          sources.push({
+            fingerprint: { hostId, provider, resolvedHomePath: dir, volumeId },
+            status: "missing",
+            scannedFiles: 0,
+            skippedFiles: 0,
+            malformedRecords: 0,
+            distinctSessions: 0,
+            message: "No opencode database on this environment.",
+          });
+          continue;
+        }
+
+        walkedRoots.push(dbPath);
+        livePaths.add(dbPath);
+        const stats = yield* Effect.promise(async () => {
+          const stat = NodeFS.statSync(dbPath);
+          return { size: stat.size, mtimeMs: stat.mtimeMs };
+        }).pipe(Effect.catchCause(() => Effect.succeed(null)));
+        if (stats === null) {
+          sources.push({
+            fingerprint: { hostId, provider, resolvedHomePath: dir, volumeId },
+            status: "failed",
+            scannedFiles: 0,
+            skippedFiles: 0,
+            malformedRecords: 0,
+            distinctSessions: 0,
+            message: "opencode database could not be read.",
+          });
+          continue;
+        }
+
+        const records = yield* readFileRecords(dbPath, stats.size, stats.mtimeMs, "opencode");
+        const sessionIds = new Set<string>();
+        for (const record of records) {
+          // Only sessions that contributed in-window count: the mtime slack
+          // admits boundary files whose records fall outside the range.
+          if (aggregator.add(record) && record.sessionId.length > 0) {
+            sessionIds.add(record.sessionId);
+          }
+        }
+        sources.push({
+          fingerprint: { hostId, provider, resolvedHomePath: dir, volumeId },
+          status: "ok",
+          scannedFiles: records.length > 0 ? 1 : 0,
+          skippedFiles: records.length === 0 ? 1 : 0,
+          malformedRecords: 0,
+          distinctSessions: sessionIds.size,
+          message: null,
         });
         continue;
       }

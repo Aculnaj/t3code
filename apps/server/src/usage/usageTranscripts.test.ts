@@ -3,9 +3,12 @@ import { describe, expect, it } from "@effect/vitest";
 import {
   GROK_COST_USD_TICKS_PER_DOLLAR,
   initialCodexScanState,
+  initialOmpScanState,
   parseClaudeLine,
   parseCodexLine,
   parseGrokLine,
+  parseOmpLine,
+  parseOpencodeMessage,
   totalTokens,
 } from "./usageTranscripts.ts";
 
@@ -562,5 +565,171 @@ describe("parseGrokLine", () => {
 
     const records = parseGrokLine(line);
     expect(records[0]?.timestampMs).toBe(1_786_372_566_000);
+  });
+});
+/** Shaped after a real omp assistant message event. */
+function ompLine(overrides: {
+  eventId: string;
+  model?: string;
+  inputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  outputTokens?: number;
+  costTotal?: number;
+}): string {
+  return JSON.stringify({
+    type: "message",
+    id: overrides.eventId,
+    parentId: null,
+    timestamp: "2026-08-10T19:06:52.062Z",
+    message: {
+      role: "assistant",
+      model: overrides.model ?? "opencode-go/deepseek-v4-flash",
+      usage: {
+        input: overrides.inputTokens ?? 25553,
+        cacheRead: overrides.cacheReadTokens ?? 0,
+        cacheWrite: overrides.cacheWriteTokens ?? 0,
+        output: overrides.outputTokens ?? 11,
+        totalTokens: 25564,
+        cost: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          total: overrides.costTotal ?? 0,
+        },
+      },
+    },
+  });
+}
+
+describe("parseOmpLine", () => {
+  it("carries the session id forward from the session event", () => {
+    const state = initialOmpScanState();
+    parseOmpLine(
+      JSON.stringify({
+        type: "session",
+        version: 3,
+        id: "019fed12-0edd-7000-b535-3b19d610d365",
+        timestamp: "2026-08-10T19:06:51.485Z",
+        cwd: "/root",
+      }),
+      state,
+    );
+    const record = parseOmpLine(ompLine({ eventId: "b617b847" }), state);
+
+    expect(record).not.toBeNull();
+    expect(record?.provider).toBe("omp");
+    expect(record?.sessionId).toBe("019fed12-0edd-7000-b535-3b19d610d365");
+    expect(record?.totals).toEqual({
+      uncachedInputTokens: 25553,
+      cachedInputTokens: 0,
+      cacheCreationTokens: 0,
+      outputTokens: 11,
+      reasoningTokens: 0,
+    });
+  });
+
+  it("reports the provider cost total when present", () => {
+    const state = initialOmpScanState();
+    const record = parseOmpLine(ompLine({ eventId: "e1", costTotal: 0.0034 }), state);
+    expect(record?.reportedCostUsd).toBe(0.0034);
+  });
+
+  it("splits cached and cache-creation input", () => {
+    const state = initialOmpScanState();
+    const record = parseOmpLine(
+      ompLine({ eventId: "e2", cacheReadTokens: 1000, cacheWriteTokens: 200 }),
+      state,
+    );
+    expect(record?.totals.cachedInputTokens).toBe(1000);
+    expect(record?.totals.cacheCreationTokens).toBe(200);
+  });
+
+  it("rejects lines without usage", () => {
+    const state = initialOmpScanState();
+    expect(
+      parseOmpLine(
+        JSON.stringify({
+          type: "message",
+          id: "e3",
+          timestamp: "2026-08-10T19:06:52Z",
+          message: { role: "user", content: "hi" },
+        }),
+        state,
+      ),
+    ).toBeNull();
+    expect(parseOmpLine(JSON.stringify({ type: "title", title: "" }), state)).toBeNull();
+  });
+});
+
+describe("parseOpencodeMessage", () => {
+  /** Shaped after a real opencode assistant message row. */
+  function opencodeRow(overrides: {
+    role?: string;
+    inputTokens?: number;
+    cacheReadTokens?: number;
+    cacheWriteTokens?: number;
+    outputTokens?: number;
+    reasoningTokens?: number;
+    cost?: number;
+    model?: string;
+    time?: number;
+  }): unknown {
+    return {
+      role: overrides.role ?? "assistant",
+      cost: overrides.cost ?? 0,
+      tokens: {
+        total: 26015,
+        input: overrides.inputTokens ?? 25992,
+        output: overrides.outputTokens ?? 23,
+        reasoning: overrides.reasoningTokens ?? 0,
+        cache: {
+          write: overrides.cacheWriteTokens ?? 0,
+          read: overrides.cacheReadTokens ?? 0,
+        },
+      },
+      modelID: overrides.model ?? "glm-5.2",
+      providerID: "aetherapi",
+      time: { created: overrides.time ?? 1783602067441, completed: 1783602074016 },
+    };
+  }
+
+  it("extracts totals, model and reported cost", () => {
+    const record = parseOpencodeMessage(opencodeRow({ cost: 0.042 }), "ses_abc");
+
+    expect(record).not.toBeNull();
+    expect(record?.provider).toBe("opencode");
+    expect(record?.model).toBe("glm-5.2");
+    expect(record?.sessionId).toBe("ses_abc");
+    expect(record?.timestampMs).toBe(1783602067441);
+    expect(record?.reportedCostUsd).toBe(0.042);
+    expect(record?.totals).toEqual({
+      uncachedInputTokens: 25992,
+      cachedInputTokens: 0,
+      cacheCreationTokens: 0,
+      outputTokens: 23,
+      reasoningTokens: 0,
+    });
+  });
+
+  it("subtracts cached input from the reported input total", () => {
+    const record = parseOpencodeMessage(
+      opencodeRow({ inputTokens: 1000, cacheReadTokens: 400, cacheWriteTokens: 100 }),
+      "",
+    );
+    expect(record?.totals.uncachedInputTokens).toBe(500);
+    expect(record?.totals.cachedInputTokens).toBe(400);
+    expect(record?.totals.cacheCreationTokens).toBe(100);
+  });
+
+  it("caps reasoning tokens at the output total", () => {
+    const record = parseOpencodeMessage(opencodeRow({ outputTokens: 10, reasoningTokens: 40 }), "");
+    expect(record?.totals.reasoningTokens).toBe(10);
+  });
+
+  it("rejects user messages and rows without tokens", () => {
+    expect(parseOpencodeMessage(opencodeRow({ role: "user" }), "")).toBeNull();
+    expect(parseOpencodeMessage({ role: "assistant", cost: 0 }, "")).toBeNull();
   });
 });
