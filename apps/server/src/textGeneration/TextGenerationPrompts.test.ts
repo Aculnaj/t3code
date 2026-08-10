@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
+import * as Schema from "effect/Schema";
 
 import {
   buildBranchNamePrompt,
@@ -110,6 +111,78 @@ describe("buildPrContentPrompt", () => {
     expect(result.prompt).toContain("Repository change request template:");
     expect(result.prompt).toContain("<!-- remove me -->\n## What changed\n\n## Verification");
     expect(result.prompt).not.toContain("include headings '## Summary' and '## Testing'");
+  });
+});
+
+describe("output schema body normalization", () => {
+  const decode = (schema: Schema.Top) => (json: string) =>
+    Schema.decodeSync(Schema.fromJsonString(schema))(json);
+
+  it("joins an array body into a single string for commit messages", () => {
+    const { outputSchema } = buildCommitMessagePrompt({
+      branch: "main",
+      stagedSummary: "M a.ts",
+      stagedPatch: "diff",
+      includeBranch: false,
+    });
+
+    const decoded = decode(outputSchema)(
+      '{"subject":"Add sorting","body":["Sortable headers on all columns","Show filtered result count"]}',
+    );
+
+    expect(decoded.subject).toBe("Add sorting");
+    expect(decoded.body).toBe("Sortable headers on all columns\nShow filtered result count");
+  });
+
+  it("keeps a string body untouched for commit messages", () => {
+    const { outputSchema } = buildCommitMessagePrompt({
+      branch: "main",
+      stagedSummary: "M a.ts",
+      stagedPatch: "diff",
+      includeBranch: false,
+    });
+
+    const decoded = decode(outputSchema)(
+      '{"subject":"Align columns","body":"Right-align streak columns"}',
+    );
+
+    expect(decoded.body).toBe("Right-align streak columns");
+  });
+
+  it("normalizes an array body when branch generation is enabled", () => {
+    const { outputSchema } = buildCommitMessagePrompt({
+      branch: "main",
+      stagedSummary: "M a.ts",
+      stagedPatch: "diff",
+      includeBranch: true,
+    });
+
+    const decoded = decode(outputSchema)(
+      '{"subject":"Add sorting","body":["Sortable headers","Owner search"],"branch":"feat/sort"}',
+    );
+
+    expect(decoded.subject).toBe("Add sorting");
+    expect(decoded.body).toBe("Sortable headers\nOwner search");
+    if ("branch" in decoded) {
+      expect(decoded.branch).toBe("feat/sort");
+    }
+  });
+
+  it("joins an array body for change request content", () => {
+    const { outputSchema } = buildPrContentPrompt({
+      baseBranch: "main",
+      headBranch: "feature/auth",
+      commitSummary: "feat: add login page",
+      diffSummary: "3 files changed",
+      diffPatch: "diff",
+    });
+
+    const decoded = decode(outputSchema)(
+      '{"title":"Add login page","body":["## Summary","- New login flow","## Testing","- Not run"]}',
+    );
+
+    expect(decoded.title).toBe("Add login page");
+    expect(decoded.body).toBe("## Summary\n- New login flow\n## Testing\n- Not run");
   });
 });
 
