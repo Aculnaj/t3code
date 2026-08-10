@@ -12,6 +12,8 @@
  *
  * @module UsageService
  */
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 
 import {
@@ -333,6 +335,40 @@ export const make = Effect.gen(function* () {
         });
       }
     }
+    // omp and opencode have no per-provider home override in server settings;
+    // they always live under the running user's home directory.
+    for (const [staticProvider, staticDirectory] of [
+      ["omp", path.join(NodeOS.homedir(), ".omp", "agent", "sessions")],
+      ["opencode", path.join(NodeOS.homedir(), ".local", "share", "opencode")],
+    ] as const) {
+      const sourceKey = staticProvider + "\0" + staticDirectory;
+      const previous = sourceCache.get(sourceKey);
+      const staticDir = yield* fileSystem
+        .realPath(staticDirectory)
+        .pipe(Effect.orElseSucceed(() => previous?.dir ?? staticDirectory));
+      const currentVolumeId = yield* Effect.promise(() => readDirectoryVolumeId(staticDir));
+      const hasRetainedHistory = fileCache
+        .entries()
+        .some(
+          ([filePath, entry]) =>
+            entry.provider === staticProvider &&
+            entry.mtimeMs >= retentionCutoffMs &&
+            entry.records.length + entry.tailRecords.length > 0 &&
+            isWithinDirectory(filePath, staticDir),
+        );
+      const staticVolumeId =
+        previous?.dir === staticDir && (hasRetainedHistory || !currentVolumeId)
+          ? previous.volumeId || currentVolumeId
+          : currentVolumeId;
+      if (previous?.dir !== staticDir || previous.volumeId !== staticVolumeId) {
+        sourceCache.set(sourceKey, { dir: staticDir, volumeId: staticVolumeId });
+        cacheDirty = true;
+      }
+      const key = `${staticProvider}\0${staticDir}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      dirs.push({ provider: staticProvider, dir: staticDir, volumeId: staticVolumeId });
+    }
     return dirs;
   });
 
@@ -570,6 +606,7 @@ export const make = Effect.gen(function* () {
           continue;
         retainedFiles.push({ path: filePath, records: [...entry.records, ...entry.tailRecords] });
       }
+
       let scannedFiles = 0;
       let skippedFiles = 0;
       // Distinct per directory. Buckets carry per-cell session counts, but a

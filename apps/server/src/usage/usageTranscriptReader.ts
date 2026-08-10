@@ -17,16 +17,20 @@
  */
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
+import type { DatabaseSync } from "node:sqlite";
 
 import type { UsageProviderKind } from "@t3tools/contracts";
 
 import {
   initialCodexScanState,
+  initialOmpScanState,
   mightCarryUsage,
   parseClaudeLine,
   parseCodexLine,
   parseGrokLine,
   type CodexScanState,
+  parseOmpLine,
+  parseOpencodeMessage,
   type UsageRecord,
 } from "./usageTranscripts.ts";
 
@@ -204,6 +208,7 @@ export async function readTranscriptRecords(
 
   try {
     let codexState = initialCodexScanState();
+    let ompState = initialOmpScanState();
     let resumed = false;
     let start = 0;
     if (
@@ -227,6 +232,12 @@ export async function readTranscriptRecords(
           return;
         }
         const record = parseCodexLine(line, state);
+        if (record !== null) out.push(record);
+        return;
+      }
+      if (provider === "omp") {
+        if (!mightCarryUsage(line, provider) && !line.includes('"type":"session"')) return;
+        const record = parseOmpLine(line, ompState);
         if (record !== null) out.push(record);
         return;
       }
@@ -309,5 +320,56 @@ export async function readTranscriptRecords(
     return null;
   } finally {
     await handle.close().catch(() => undefined);
+  }
+}
+
+/**
+ * Reads priced assistant messages from the opencode SQLite database.
+ *
+ * opencode persists its session log in a SQLite database rather than JSONL, so
+ * this queries the `message` table and runs each row's `data` document through
+ * {@link parseOpencodeMessage}. The row count is small (a few thousand even on
+ * long-lived installs), so materialising every row is fine.
+ *
+ * Returns `null` when the database could not be opened or read, matching the
+ * JSONL reader's failure semantics for the scan cache.
+ */
+export async function readOpencodeDbRecords(
+  dbPath: string,
+): Promise<readonly UsageRecord[] | null> {
+  // node:sqlite exists only in the Node runtime the server ships with; the
+  // Bun-side test bundle cannot load it statically, hence the lazy import
+  // despite the static type import above.
+  const { DatabaseSync } = await import("node:sqlite");
+  let database: DatabaseSync | null = null;
+  try {
+    database = new DatabaseSync(dbPath, { readOnly: true });
+    const rows = database
+      .prepare("SELECT data, session_id FROM message")
+      .all() as unknown as readonly {
+      data: string;
+      session_id: string;
+    }[];
+
+    const records: UsageRecord[] = [];
+    for (const row of rows) {
+      let data: unknown;
+      try {
+        data = JSON.parse(row.data);
+      } catch {
+        continue;
+      }
+      const record = parseOpencodeMessage(data, row.session_id);
+      if (record !== null) records.push(record);
+    }
+    return records;
+  } catch {
+    return null;
+  } finally {
+    try {
+      database?.close();
+    } catch {
+      // Closing a read-only connection is best-effort.
+    }
   }
 }

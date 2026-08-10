@@ -86,6 +86,8 @@ describe("buildPeriodColumns", () => {
     const [first] = buildPeriodColumns(days, byDay, "cost");
 
     expect(first?.bands).toEqual([
+      { provider: "opencode", value: 0 },
+      { provider: "omp", value: 0 },
       { provider: "codex", value: 10 },
       { provider: "claude", value: 20 },
       { provider: "grok", value: 0 },

@@ -68,7 +68,7 @@ export function totalTokens(totals: UsageTokenTotals): number {
  * an order of magnitude.
  */
 export function mightCarryUsage(line: string, provider: UsageProviderKind): boolean {
-  if (provider === "claude") return line.includes('"usage"');
+  if (provider === "claude" || provider === "omp") return line.includes('"usage"');
   if (provider === "grok") return line.includes('"turn_completed"');
   return line.includes('"token_count"');
 }
@@ -483,6 +483,172 @@ export function parseGrokLine(line: string): readonly UsageRecord[] {
     });
   }
   return results;
+}
+
+
+/* -------------------------------------------------------------------------- */
+/* Oh My Pi                                                                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Rolling state for a single omp session file.
+ *
+ * omp carries the session id on `session` events that hold no usage of their
+ * own, so the id is carried forward for later `message` events. Unlike Codex,
+ * every assistant `message` carries its own `model`, so no model carry-forward
+ * is needed.
+ */
+export interface OmpScanState {
+  sessionId: string;
+}
+
+export function initialOmpScanState(): OmpScanState {
+  return { sessionId: "" };
+}
+
+/**
+ * Feeds one line of an omp session file into `state`, returning a record when
+ * the line was a priced assistant message.
+ *
+ * omp reports one `message` event per assistant turn and repeats the complete
+ * `usage` object on every content block of that message, so summing them
+ * overcounts. `dedupeKey` is the event id, which is stable per message; the
+ * aggregator keeps the first.
+ */
+export function parseOmpLine(line: string, state: OmpScanState): UsageRecord | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+
+  const record = parsed as Record<string, unknown>;
+
+  if (record["type"] === "session") {
+    const id = record["id"];
+    if (typeof id === "string") state.sessionId = id;
+    return null;
+  }
+
+  if (record["type"] !== "message") return null;
+
+  const message = record["message"];
+  if (typeof message !== "object" || message === null) return null;
+  const messageRecord = message as Record<string, unknown>;
+
+  const usage = messageRecord["usage"];
+  if (typeof usage !== "object" || usage === null) return null;
+  const usageRecord = usage as Record<string, unknown>;
+
+  const timestampMs = parseTimestampMs(record["timestamp"]);
+  if (timestampMs === null) return null;
+
+  const model = typeof messageRecord["model"] === "string" ? messageRecord["model"] : "";
+  if (model.length === 0) return null;
+
+  const outputTokens = int(usageRecord["output"]);
+  const uncachedInputTokens = int(usageRecord["input"]);
+  const totals: UsageTokenTotals = {
+    uncachedInputTokens,
+    cachedInputTokens: int(usageRecord["cacheRead"]),
+    cacheCreationTokens: int(usageRecord["cacheWrite"]),
+    outputTokens,
+    // omp folds any thinking tokens into output and does not break them out.
+    reasoningTokens: 0,
+  };
+  if (totalTokens(totals) === 0) return null;
+
+  const cost = usageRecord["cost"];
+  const reportedCostUsd =
+    typeof cost === "object" &&
+    cost !== null &&
+    typeof (cost as Record<string, unknown>)["total"] === "number"
+      ? ((cost as Record<string, unknown>)["total"] as number)
+      : null;
+
+  return {
+    provider: "omp",
+    timestampMs,
+    model,
+    sessionId: state.sessionId,
+    totals,
+    reportedCostUsd:
+      reportedCostUsd !== null && Number.isFinite(reportedCostUsd) ? reportedCostUsd : null,
+    // The event id is unique within a session file; cross-file copies are
+    // de-duplicated by the aggregator when a fork re-emits the same events.
+    dedupeKey: typeof record["id"] === "string" ? (record["id"] as string) : null,
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/* OpenCode                                                                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Parses one assistant `message.data` row from the opencode SQLite database.
+ *
+ * Unlike the JSONL providers, opencode persists usage inside the message
+ * itself, so each row maps to exactly one record and needs no session-scoped
+ * carry state.
+ */
+export function parseOpencodeMessage(data: unknown, sessionId: string): UsageRecord | null {
+  if (typeof data !== "object" || data === null) return null;
+  const record = data as Record<string, unknown>;
+  if (record["role"] !== "assistant") return null;
+
+  const tokens = record["tokens"];
+  if (typeof tokens !== "object" || tokens === null) return null;
+  const tokensRecord = tokens as Record<string, unknown>;
+  const cache = tokensRecord["cache"];
+  const cacheRecord =
+    typeof cache === "object" && cache !== null ? (cache as Record<string, unknown>) : {};
+
+  // opencode timestamps are epoch millis; some rows nest them under `created`.
+  const time = record["time"];
+  const timestampMs =
+    typeof time === "number"
+      ? time
+      : typeof time === "object" &&
+          time !== null &&
+          typeof (time as Record<string, unknown>)["created"] === "number"
+        ? ((time as Record<string, unknown>)["created"] as number)
+        : null;
+  if (timestampMs === null || !Number.isFinite(timestampMs)) return null;
+
+  const model = typeof record["modelID"] === "string" ? record["modelID"] : "";
+  if (model.length === 0) return null;
+
+  const inputTokens = int(tokensRecord["input"]);
+  const cachedInputTokens = int(cacheRecord["read"]);
+  const cacheCreationTokens = int(cacheRecord["write"]);
+  const outputTokens = int(tokensRecord["output"]);
+
+  const totals: UsageTokenTotals = {
+    // opencode reports `input` inclusive of the cached portion.
+    uncachedInputTokens: Math.max(0, inputTokens - cachedInputTokens - cacheCreationTokens),
+    cachedInputTokens,
+    cacheCreationTokens,
+    outputTokens,
+    // Reported inside output_tokens, surfaced separately for the token mix.
+    reasoningTokens: Math.min(outputTokens, int(tokensRecord["reasoning"])),
+  };
+  if (totalTokens(totals) === 0) return null;
+
+  const cost = record["cost"];
+  const reportedCostUsd = typeof cost === "number" && Number.isFinite(cost) ? cost : null;
+
+  return {
+    provider: "opencode",
+    timestampMs,
+    model,
+    sessionId,
+    totals,
+    reportedCostUsd,
+    // Database rows are inherently unique; nothing to de-duplicate.
+    dedupeKey: null,
+  };
 }
 
 export { EMPTY_TOTALS };
