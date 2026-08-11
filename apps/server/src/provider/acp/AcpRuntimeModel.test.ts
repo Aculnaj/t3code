@@ -264,8 +264,9 @@ describe("AcpRuntimeModel", () => {
       update: {
         sessionUpdate: "tool_call",
         toolCallId: "tool-big",
+        title: "Terminal",
         kind: "execute",
-        status: "inProgress",
+        status: "in_progress",
         rawInput: {
           command: "bash -lc 'echo start'",
           input: { content: "x".repeat(100_000) },

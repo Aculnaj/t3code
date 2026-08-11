@@ -122,6 +122,7 @@ describe("ComposerPrimaryActions", () => {
     const markup = renderSendButton();
 
     expect(markup).not.toContain("stage-nightly");
+    expect(markup).toContain("bg-message-action text-message-action-foreground");
   });
 
   it("renders a queue action alongside stop while running with a sendable draft", () => {
