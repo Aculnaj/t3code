@@ -161,6 +161,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
     );
   }
 
+
   if (showPlanFollowUpPrompt) {
     if (promptHasText) {
       return (
