@@ -413,6 +413,13 @@ const make = Effect.gen(function* () {
     if (!thread) {
       return;
     }
+    // A provider RPC defect (e.g. an undecodable omp session/prompt response)
+    // surfaces as an "Internal error" stack — replace it with an actionable
+    // message so the UI shows what happened instead of a crash dump. The next
+    // turn starts a fresh session (error sessions are skipped like stopped).
+    const detail = input.detail.includes("decodeJsonError")
+      ? "Provider returned an undecodable response (the session was likely busy or stale). The next turn starts a fresh session."
+      : input.detail;
     const session = thread.session;
     yield* setThreadSession({
       threadId: input.threadId,
@@ -425,7 +432,7 @@ const make = Effect.gen(function* () {
         }),
         status: session?.status === "stopped" ? "stopped" : "error",
         activeTurnId: null,
-        lastError: input.detail,
+        lastError: detail,
         updatedAt: input.createdAt,
       },
       createdAt: input.createdAt,
@@ -581,7 +588,10 @@ const make = Effect.gen(function* () {
 
     const activeSession = yield* resolveActiveSession(threadId);
     const activeThreadSession =
-      thread.session !== null && thread.session.status !== "stopped" && activeSession
+      thread.session !== null &&
+      thread.session.status !== "stopped" &&
+      thread.session.status !== "error" &&
+      activeSession
         ? thread.session
         : null;
     if (
@@ -750,7 +760,12 @@ const make = Effect.gen(function* () {
       });
 
     const existingSessionThreadId =
-      thread.session && thread.session.status !== "stopped" && activeSession ? thread.id : null;
+      thread.session &&
+      thread.session.status !== "stopped" &&
+      thread.session.status !== "error" &&
+      activeSession
+        ? thread.id
+        : null;
     if (existingSessionThreadId) {
       const runtimeModeChanged = thread.runtimeMode !== thread.session?.runtimeMode;
       const cwdChanged = effectiveCwd !== activeSession?.cwd;
