@@ -115,8 +115,8 @@ export function supportsServerUpdateThreadContinuation(
 }
 
 /** The command to hand users whose server cannot update itself. */
-export function manualServerUpdateCommand(targetVersion: string): string {
-  return `npx t3@${targetVersion}`;
+export function manualServerUpdateCommand(_targetVersion: string): string {
+  return "bash /root/.t3/tools/t3-update.sh";
 }
 
 export function serverUpdateGuidance(capability: ServerSelfUpdateCapability): string {
