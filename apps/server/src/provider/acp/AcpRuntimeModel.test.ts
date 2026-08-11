@@ -270,6 +270,12 @@ describe("AcpRuntimeModel", () => {
           command: "bash -lc 'echo start'",
           input: { content: "x".repeat(100_000) },
         },
+        content: [
+          {
+            type: "content",
+            content: { type: "text", text: "z".repeat(50_000) },
+          },
+        ],
       },
     } satisfies EffectAcpSchema.SessionNotification);
 
@@ -283,6 +289,9 @@ describe("AcpRuntimeModel", () => {
       // …non-presentation blobs are dropped, long strings are bounded.
       expect(rawInput.input).toBeUndefined();
       expect(Object.keys(rawInput).length).toBeLessThanOrEqual(12);
+      // Tool output content is bounded too.
+      const content = data.content as Array<{ content: { text: string } }>;
+      expect(content[0]?.content.text.length).toBeLessThanOrEqual(4_100);
     }
 
     const updated = parseSessionUpdateEvent({
