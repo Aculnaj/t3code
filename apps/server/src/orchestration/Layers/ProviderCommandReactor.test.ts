@@ -678,6 +678,82 @@ describe("ProviderCommandReactor", () => {
     }),
   );
 
+  it("skips an errored session on the next turn and starts a fresh session", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    // Turn 1: sendTurn fails with an undecodable provider response defect.
+    harness.sendTurn.mockImplementation(() =>
+      Effect.fail(
+        new Error(
+          "Internal error\n    at decodeJsonError (file:///…/SchemaTransformation.js:855:8)",
+        ),
+      ),
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-undecodable"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-undecodable"),
+          role: "user",
+          text: "go",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(async () => {
+      const readModel = await harness.readModel();
+      return (
+        readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"))?.session
+          ?.status === "error"
+      );
+    });
+    let readModel = await harness.readModel();
+    let thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    // The decodeJsonError crash dump is replaced with an actionable message.
+    expect(thread?.session?.lastError).toContain("undecodable response");
+    expect(thread?.session?.lastError).not.toContain("decodeJsonError");
+
+    // Turn 2: sendTurn recovers — the errored session must be skipped and a
+    // fresh session started instead of reusing the broken one.
+    harness.sendTurn.mockImplementation(() =>
+      Effect.succeed({
+        threadId: ThreadId.make("thread-1"),
+        turnId: asTurnId("turn-2"),
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-recover"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-recover"),
+          role: "user",
+          text: "retry",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:01.000Z",
+      }),
+    );
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+    readModel = await harness.readModel();
+    thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    expect(thread?.session?.status).toBe("starting");
+    expect(thread?.session?.lastError).toBeNull();
+    expect(harness.startSession).toHaveBeenCalledTimes(2);
+  });
+
   it("retries thread title generation after a transient failure", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
