@@ -1091,6 +1091,22 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
     expect(Duration.toMillis(GitManager.prLookupFailureTtl(20))).toBe(900_000);
   });
 
+  it.effect("status skips PR lookups entirely for repositories without a remote", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+
+      const { manager, ghCalls } = yield* makeManager({ ghScenario: {} });
+
+      const status = yield* manager.status({ cwd: repoDir });
+      expect(status.refName).toBe("main");
+      expect(status.pr).toBeNull();
+      // A repo with no remote can never have a PR: probing `gh` would only
+      // fail and produce a permanent error loop. Assert no gh call happens.
+      expect(ghCalls.length).toBe(0);
+    }),
+  );
+
   it.effect(
     "status ignores unrelated fork PRs when the current branch tracks the same repository",
     () =>
@@ -1391,6 +1407,8 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       const repoDir = yield* makeTempDir("t3code-git-manager-");
       yield* initRepo(repoDir);
       yield* runGit(repoDir, ["checkout", "-b", "feature/status-merged-pr"]);
+      const mergedPrRemoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", mergedPrRemoteDir]);
 
       const { manager } = yield* makeManager({
         ghScenario: {
@@ -1499,6 +1517,8 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       const repoDir = yield* makeTempDir("t3code-git-manager-");
       yield* initRepo(repoDir);
       yield* runGit(repoDir, ["checkout", "-b", "feature/status-open-over-merged"]);
+      const openPrRemoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", openPrRemoteDir]);
 
       const { manager } = yield* makeManager({
         ghScenario: {

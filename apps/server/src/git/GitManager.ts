@@ -1003,6 +1003,13 @@ export const make = Effect.gen(function* () {
         if (details.upstreamRef === null && (yield* isUnpublishedBranch(cwd, headContext))) {
           return { latest: null, headContext };
         }
+        // A repository without any configured remote can never have a PR: a
+        // provider probe (gh) would fail to resolve the repository and loop on
+        // errors for as long as the branch is active. Branches with an
+        // upstream are unaffected (their remote identity is tracked by refs).
+        if (details.upstreamRef === null && headContext.headRemoteUrlKey === null) {
+          return { latest: null, headContext };
+        }
         const latest = yield* findLatestPrForHeadContext(cwd, headContext);
         return { latest, headContext };
       });
