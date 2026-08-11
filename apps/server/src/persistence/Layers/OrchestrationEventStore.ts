@@ -13,9 +13,11 @@ import {
 } from "@t3tools/contracts";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
@@ -74,6 +76,24 @@ const ReadFromSequenceRequestSchema = Schema.Struct({
 });
 const DEFAULT_READ_FROM_SEQUENCE_LIMIT = 1_000;
 const READ_PAGE_SIZE = 500;
+
+/**
+ * Walks the cause chain of an append failure and reports SQLITE_BUSY /
+ * "database is locked". Only those failures are safe to retry: a dropped
+ * event would stall the affected turn forever.
+ */
+function isSqliteBusyError(error: unknown): boolean {
+  let current: unknown = error;
+  const seen = new Set<unknown>();
+  while (current !== null && current !== undefined && !seen.has(current)) {
+    seen.add(current);
+    const message = current instanceof Error ? current.message : String(current);
+    if (/database is locked|SQLITE_BUSY/i.test(message)) return true;
+    if (typeof current !== "object" || !("cause" in current)) break;
+    current = current.cause;
+  }
+  return false;
+}
 
 function inferActorKind(
   event: Omit<OrchestrationEvent, "sequence">,
@@ -202,19 +222,35 @@ const makeEventStore = Effect.gen(function* () {
       commandId: event.commandId,
       payloadJson: event.payload,
       metadataJson: event.metadata,
-    }).pipe(
-      Effect.mapError(
-        toPersistenceSqlOrDecodeError(
-          "OrchestrationEventStore.append:insert",
-          "OrchestrationEventStore.append:decodeRow",
+    })
+      .pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "OrchestrationEventStore.append:insert",
+            "OrchestrationEventStore.append:decodeRow",
+          ),
         ),
-      ),
-      Effect.flatMap((row) =>
-        decodeEvent(row).pipe(
-          Effect.mapError(toPersistenceDecodeError("OrchestrationEventStore.append:rowToEvent")),
+        Effect.flatMap((row) =>
+          decodeEvent(row).pipe(
+            Effect.mapError(toPersistenceDecodeError("OrchestrationEventStore.append:rowToEvent")),
+          ),
         ),
-      ),
-    );
+      )
+      .pipe(
+        // A concurrent writer (streaming turns append events in batches) can
+        // hold the SQLite write lock longer than busy_timeout. Dropping the
+        // event silently stalls the turn forever ("Sending..." / pending turn
+        // with no id), so retry BUSY appends with backoff instead.
+        Effect.retry({
+          while: isSqliteBusyError,
+          schedule: Schedule.exponential("50 millis", 2).pipe(
+            Schedule.modifyDelay(({ duration }) =>
+              Effect.succeed(Duration.min(duration, Duration.seconds(1))),
+            ),
+            Schedule.upTo({ duration: "10 seconds" }),
+          ),
+        }),
+      );
 
   const readFromSequence: OrchestrationEventStoreShape["readFromSequence"] = (
     sequenceExclusive,

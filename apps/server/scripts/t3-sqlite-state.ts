@@ -201,7 +201,7 @@ export const runSqliteState = Effect.fn("runSqliteState")(function* (
 
   const program = Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
-    yield* sql.unsafe("PRAGMA busy_timeout = 5000").unprepared;
+    yield* sql.unsafe("PRAGMA busy_timeout = 15000").unprepared;
 
     if (input.operation === "query") {
       const rows = yield* sql.unsafe<RawSqliteRow>(source).unprepared.pipe(
