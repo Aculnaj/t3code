@@ -115,8 +115,10 @@ describe("buildPrContentPrompt", () => {
 });
 
 describe("output schema body normalization", () => {
-  const decode = (schema: Schema.Top) => (json: string) =>
-    Schema.decodeSync(Schema.fromJsonString(schema))(json);
+  const decode =
+    <B extends Schema.ConstraintDecoder<unknown>>(schema: B) =>
+    (json: string): B["Type"] =>
+      Schema.decodeUnknownSync(schema)(JSON.parse(json) as unknown);
 
   it("joins an array body into a single string for commit messages", () => {
     const { outputSchema } = buildCommitMessagePrompt({

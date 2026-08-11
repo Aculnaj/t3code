@@ -243,6 +243,7 @@ describe("ComposerPrimaryActions", () => {
 
     expect(markup).not.toContain("stage-nightly");
     expect(markup).toContain("bg-message-action text-message-action-foreground");
+
   });
 
   it("only renders stop while running when Enter-to-send is available", () => {
