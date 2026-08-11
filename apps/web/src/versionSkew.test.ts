@@ -14,6 +14,7 @@ import {
   dismissVersionMismatch,
   isServerUpdateFailureDismissed,
   isVersionMismatchDismissed,
+  manualServerUpdateCommand,
   resolveServerConfigVersionMismatch,
   resolveServerSelfUpdateCapability,
   resolveVersionMismatch,
@@ -217,5 +218,13 @@ describe("versionSkew", () => {
   it("matches version-drift guidance to the advertised update path", () => {
     expect(serverUpdateGuidance("respawn")).toBe("Update to stay in sync");
     expect(serverUpdateGuidance("desktop-managed")).toBe("Update the desktop app");
+  });
+});
+describe("manual server update command", () => {
+  it("hands out the fork update script as the manual update command", () => {
+    // The fork runs from a local build (systemd t3-code.service); the stock
+    // `npx t3@<version>` command would pull the upstream npm package and lose
+    // the OMP provider driver.
+    expect(manualServerUpdateCommand("9.9.9")).toBe("bash /root/.t3/tools/t3-update.sh");
   });
 });
