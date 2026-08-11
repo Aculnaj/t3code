@@ -258,6 +258,52 @@ describe("AcpRuntimeModel", () => {
     }
   });
 
+  it("compacts oversized raw tool inputs and outputs to presentation keys", () => {
+    const created = parseSessionUpdateEvent({
+      sessionId: "session-1",
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: "tool-big",
+        kind: "execute",
+        status: "inProgress",
+        rawInput: {
+          command: "bash -lc 'echo start'",
+          input: { content: "x".repeat(100_000) },
+        },
+      },
+    } satisfies EffectAcpSchema.SessionNotification);
+
+    expect(created.events).toHaveLength(1);
+    const event = created.events[0];
+    if (event?._tag === "ToolCallUpdated") {
+      const data = event.toolCall.data as Record<string, unknown>;
+      const rawInput = data.rawInput as Record<string, unknown>;
+      // Presentation keys survive…
+      expect(rawInput.command).toBe("bash -lc 'echo start'");
+      // …non-presentation blobs are dropped, long strings are bounded.
+      expect(rawInput.input).toBeUndefined();
+      expect(Object.keys(rawInput).length).toBeLessThanOrEqual(12);
+    }
+
+    const updated = parseSessionUpdateEvent({
+      sessionId: "session-1",
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tool-big",
+        status: "completed",
+        rawOutput: { exitCode: 0, stdout: "y".repeat(50_000) },
+      },
+    } satisfies EffectAcpSchema.SessionNotification);
+
+    expect(updated.events).toHaveLength(1);
+    const updatedEvent = updated.events[0];
+    if (updatedEvent?._tag === "ToolCallUpdated") {
+      const rawOutput = updatedEvent.toolCall.data?.rawOutput as Record<string, unknown>;
+      expect(rawOutput.exitCode).toBe(0);
+      expect(String(rawOutput.stdout).length).toBeLessThanOrEqual(4_100);
+    }
+  });
+
   it("trims padded current mode updates before emitting a mode change", () => {
     const result = parseSessionUpdateEvent({
       sessionId: "session-1",

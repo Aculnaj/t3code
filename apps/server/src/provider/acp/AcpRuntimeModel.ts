@@ -446,6 +446,70 @@ function canonicalItemTypeFromAcpToolKind(kind: string | undefined): ToolLifecyc
   }
 }
 
+// Tool inputs/outputs can carry large payloads (file contents, command output,
+// skill bodies). The UI only ever renders the command/executable/args/query and
+// path-ish fields (see packages/shared/src/toolActivity.ts); persisting the raw
+// blobs bloats every thread snapshot by megabytes and slows detail loads. Keep
+// only the presentation-relevant keys, truncating long strings.
+const COMPACT_TOOL_INPUT_KEYS = [
+  "command",
+  "executable",
+  "args",
+  "query",
+  "path",
+  "filePath",
+  "relativePath",
+  "filename",
+  "newPath",
+  "oldPath",
+  "id",
+  "name",
+] as const;
+const COMPACT_TOOL_OUTPUT_KEYS = [
+  "exitCode",
+  "stdout",
+  "stderr",
+  "result",
+  "output",
+  "item",
+  "totalFiles",
+] as const;
+const COMPACT_TOOL_STRING_LIMIT = 4_000;
+const COMPACT_TOOL_ARRAY_LIMIT = 20;
+
+function compactToolPayload(value: unknown, keys: readonly string[]): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  const record = value as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const key of keys) {
+    const item = record[key];
+    if (item === undefined) {
+      continue;
+    }
+    if (typeof item === "string") {
+      out[key] =
+        item.length > COMPACT_TOOL_STRING_LIMIT
+          ? `${item.slice(0, COMPACT_TOOL_STRING_LIMIT)}…[truncated]`
+          : item;
+      continue;
+    }
+    if (Array.isArray(item)) {
+      out[key] = item
+        .slice(0, COMPACT_TOOL_ARRAY_LIMIT)
+        .map((entry) =>
+          typeof entry === "string" && entry.length > COMPACT_TOOL_STRING_LIMIT
+            ? `${entry.slice(0, COMPACT_TOOL_STRING_LIMIT)}…[truncated]`
+            : entry,
+        );
+      continue;
+    }
+    out[key] = item;
+  }
+  return out;
+}
+
 function makeToolCallState(
   input: {
     readonly toolCallId: string;
@@ -482,10 +546,10 @@ function makeToolCallState(
     data.command = command;
   }
   if (input.rawInput !== undefined) {
-    data.rawInput = input.rawInput;
+    data.rawInput = compactToolPayload(input.rawInput, COMPACT_TOOL_INPUT_KEYS);
   }
   if (input.rawOutput !== undefined) {
-    data.rawOutput = boundToolCallRawOutput(input.rawOutput);
+    data.rawOutput = compactToolPayload(input.rawOutput, COMPACT_TOOL_OUTPUT_KEYS);
   }
   if (input.content !== undefined) {
     data.content = extractedContent.content ?? input.content;
