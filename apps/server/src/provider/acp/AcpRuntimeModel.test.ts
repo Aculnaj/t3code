@@ -292,7 +292,9 @@ describe("AcpRuntimeModel", () => {
       expect(Object.keys(rawInput).length).toBeLessThanOrEqual(12);
       // Tool output content is bounded too.
       const content = data.content as Array<{ content: { text: string } }>;
-      expect(content[0]?.content.text.length).toBeLessThanOrEqual(4_100);
+      // Main-style tail window: bounded entry with the truncation marker.
+      expect(content[0]?.content.text.length).toBeLessThanOrEqual(8_100);
+      expect(content[0]?.content.text.startsWith("[Earlier output truncated]")).toBe(true);
     }
 
     const updated = parseSessionUpdateEvent({
