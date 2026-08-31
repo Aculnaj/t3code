@@ -155,6 +155,10 @@ describe("ProviderCommandReactor", () => {
     readonly startSessionEffect?: (
       session: ProviderSession,
     ) => Effect.Effect<ProviderSession, ProviderAdapterRequestError>;
+    readonly sendTurnEffect?: () => Effect.Effect<
+      { readonly threadId: ThreadId; readonly turnId: TurnId },
+      ProviderAdapterRequestError
+    >;
   }) {
     const now = "2026-01-01T00:00:00.000Z";
     const baseDir =
@@ -231,11 +235,14 @@ describe("ProviderCommandReactor", () => {
         ),
       );
     });
+    const sendTurnEffect = input?.sendTurnEffect;
     const sendTurn = vi.fn((_: unknown) =>
-      Effect.succeed({
-        threadId: ThreadId.make("thread-1"),
-        turnId: asTurnId("turn-1"),
-      }),
+      sendTurnEffect
+        ? sendTurnEffect()
+        : Effect.succeed({
+            threadId: ThreadId.make("thread-1"),
+            turnId: asTurnId("turn-1"),
+          }),
     );
     const interruptTurn = vi.fn((_: unknown) => input?.interruptTurnEffect?.() ?? Effect.void);
     const respondToRequest = vi.fn<ProviderServiceShape["respondToRequest"]>(() => Effect.void);
@@ -679,17 +686,26 @@ describe("ProviderCommandReactor", () => {
   );
 
   it("skips an errored session on the next turn and starts a fresh session", async () => {
-    const harness = await createHarness();
+    let sendTurnFails = true;
+    const harness = await createHarness({
+      sendTurnEffect: () =>
+        sendTurnFails
+          ? Effect.fail(
+              new ProviderAdapterRequestError({
+                provider: "omp",
+                method: "session.prompt",
+                detail:
+                  "Internal error\n    at decodeJsonError (file:///…/SchemaTransformation.js:855:8)",
+              }),
+            )
+          : Effect.succeed({
+              threadId: ThreadId.make("thread-1"),
+              turnId: asTurnId("turn-2"),
+            }),
+    });
     const now = "2026-01-01T00:00:00.000Z";
 
     // Turn 1: sendTurn fails with an undecodable provider response defect.
-    harness.sendTurn.mockImplementation(() =>
-      Effect.fail(
-        new Error(
-          "Internal error\n    at decodeJsonError (file:///…/SchemaTransformation.js:855:8)",
-        ),
-      ),
-    );
 
     await Effect.runPromise(
       harness.engine.dispatch({
@@ -723,12 +739,7 @@ describe("ProviderCommandReactor", () => {
 
     // Turn 2: sendTurn recovers — the errored session must be skipped and a
     // fresh session started instead of reusing the broken one.
-    harness.sendTurn.mockImplementation(() =>
-      Effect.succeed({
-        threadId: ThreadId.make("thread-1"),
-        turnId: asTurnId("turn-2"),
-      }),
-    );
+    sendTurnFails = false;
     await Effect.runPromise(
       harness.engine.dispatch({
         type: "thread.turn.start",

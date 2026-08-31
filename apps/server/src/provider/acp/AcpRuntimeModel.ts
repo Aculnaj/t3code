@@ -476,39 +476,6 @@ const COMPACT_TOOL_OUTPUT_KEYS = [
 ] as const;
 const COMPACT_TOOL_STRING_LIMIT = 4_000;
 const COMPACT_TOOL_ARRAY_LIMIT = 20;
-const COMPACT_TOOL_CONTENT_MAX_ITEMS = 10;
-
-function compactToolContent(
-  content: ReadonlyArray<EffectAcpSchema.ToolCallContent> | null | undefined,
-): unknown {
-  if (!Array.isArray(content)) {
-    return content;
-  }
-  return content.slice(0, COMPACT_TOOL_CONTENT_MAX_ITEMS).map((entry) => {
-    if (entry === null || typeof entry !== "object") {
-      return entry;
-    }
-    const record = entry as Record<string, unknown>;
-    const inner = record.content;
-    if (inner !== null && typeof inner === "object") {
-      const innerRecord = inner as Record<string, unknown>;
-      if (
-        typeof innerRecord.text === "string" &&
-        innerRecord.text.length > COMPACT_TOOL_STRING_LIMIT
-      ) {
-        return {
-          ...record,
-          content: {
-            ...innerRecord,
-            text: `${innerRecord.text.slice(0, COMPACT_TOOL_STRING_LIMIT)}…[truncated]`,
-          },
-        };
-      }
-    }
-    return entry;
-  });
-}
-
 function compactToolPayload(value: unknown, keys: readonly string[]): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return {};
@@ -584,7 +551,7 @@ function makeToolCallState(
     data.rawOutput = compactToolPayload(input.rawOutput, COMPACT_TOOL_OUTPUT_KEYS);
   }
   if (input.content !== undefined) {
-    data.content = compactToolContent(extractedContent.content ?? input.content);
+    data.content = extractedContent.content ?? input.content;
   }
   if (input.locations !== undefined) {
     data.locations = input.locations;
