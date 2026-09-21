@@ -258,7 +258,7 @@ describe("AcpRuntimeModel", () => {
     }
   });
 
-  it("compacts oversized raw tool inputs and outputs to presentation keys", () => {
+  it("passes raw tool input through and bounds oversized content and output", () => {
     const created = parseSessionUpdateEvent({
       sessionId: "session-1",
       update: {
@@ -285,11 +285,10 @@ describe("AcpRuntimeModel", () => {
     if (event?._tag === "ToolCallUpdated") {
       const data = event.toolCall.data as Record<string, unknown>;
       const rawInput = data.rawInput as Record<string, unknown>;
-      // Presentation keys survive…
+      // Raw input passes through untouched: downstream normalizers
+      // (e.g. Antigravity command aliases) read arbitrary fields.
       expect(rawInput.command).toBe("bash -lc 'echo start'");
-      // …non-presentation blobs are dropped, long strings are bounded.
-      expect(rawInput.input).toBeUndefined();
-      expect(Object.keys(rawInput).length).toBeLessThanOrEqual(12);
+      expect(rawInput.input).toEqual({ content: "x".repeat(100_000) });
       // Tool output content is bounded too.
       const content = data.content as Array<{ content: { text: string } }>;
       // Main-style tail window: bounded entry with the truncation marker.
