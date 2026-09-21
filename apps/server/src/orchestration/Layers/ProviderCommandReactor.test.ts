@@ -185,7 +185,7 @@ describe("ProviderCommandReactor", () => {
     readonly stopSessionEffect?: () => Effect.Effect<void, ProviderAdapterRequestError>;
     readonly startSessionEffect?: (
       session: ProviderSession,
-    ) => Effect.Effect<ProviderSession, ProviderAdapterRequestError>;
+    ) => Effect.Effect<ProviderSession, ProviderServiceError>;
     readonly tryHandlePromptCommandEffect?: ProviderAuthService["Service"]["tryHandlePromptCommand"];
     readonly sendTurnEffect?: () => Effect.Effect<
       { readonly threadId: ThreadId; readonly turnId: TurnId },
