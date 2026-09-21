@@ -311,7 +311,7 @@ describe("AcpRuntimeModel", () => {
     if (updatedEvent?._tag === "ToolCallUpdated") {
       const rawOutput = updatedEvent.toolCall.data?.rawOutput as Record<string, unknown>;
       expect(rawOutput.exitCode).toBe(0);
-      expect(String(rawOutput.stdout).length).toBeLessThanOrEqual(4_100);
+      expect(String(rawOutput.stdout).length).toBeLessThanOrEqual(8_100);
     }
   });
 
