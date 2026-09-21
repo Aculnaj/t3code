@@ -168,6 +168,7 @@ describe("UsageService", () => {
           serviceLayers({
             prefix: "usage-service-accounts-test",
             home,
+            environment: { HOME: home },
             settings: {
               ...settings,
               providerInstances: {

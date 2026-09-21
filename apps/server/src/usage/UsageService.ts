@@ -336,10 +336,13 @@ export const make = Effect.gen(function* () {
       }
     }
     // omp and opencode have no per-provider home override in server settings;
-    // they always live under the running user's home directory.
+    // they live under the running user's home directory. Prefer $HOME from the
+    // host environment (production mirrors process.env) so scans stay
+    // hermetic where the environment is faked; otherwise use the OS home.
+    const userHome = hostEnvironment["HOME"]?.trim() || NodeOS.homedir();
     for (const [staticProvider, staticDirectory] of [
-      ["omp", path.join(NodeOS.homedir(), ".omp", "agent", "sessions")],
-      ["opencode", path.join(NodeOS.homedir(), ".local", "share", "opencode")],
+      ["omp", path.join(userHome, ".omp", "agent", "sessions")],
+      ["opencode", path.join(userHome, ".local", "share", "opencode")],
     ] as const) {
       const sourceKey = staticProvider + "\0" + staticDirectory;
       const previous = sourceCache.get(sourceKey);
