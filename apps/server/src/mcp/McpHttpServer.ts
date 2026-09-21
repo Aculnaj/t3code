@@ -56,16 +56,20 @@ const unauthorized = HttpServerResponse.jsonUnsafe(
 );
 
 /**
- * omp's ACP-integrated MCP client (Bun) speaks the 2025-03-26 streamable-HTTP
- * dialect: it never sends the `MCP-Protocol-Version` header, and the server's
- * version-header enforcement (`requiresVersionHeader`) answers those requests
- * with 400, which makes omp abort the whole ACP session. The message shapes
- * between 2025-03-26 and 2025-06-18 are identical for this server's surface,
- * so reuse the 2025-06-18 schema set with the legacy transport options.
+ * omp's ACP-integrated MCP client (Bun) offers MCP `2025-11-25` during
+ * `initialize` but never sends the `MCP-Protocol-Version` header afterwards.
+ * The stock `2025-11-25` adapter enforces that header (`requiresVersionHeader`)
+ * and answers the header-less follow-up with 400, which makes omp abort the
+ * whole ACP session. The request/response shapes are identical for this
+ * server's surface, so keep the `2025-11-25` schema set and relax only the
+ * transport requirements. The protocol version must stay `2025-11-25`: the
+ * registry routes requests through the version's own RPC set, so pairing a
+ * foreign version with these handlers fails the request outright (HTTP 500).
+ * `2025-03-26` stays last as the native header-less fallback for clients that
+ * offer a version this build does not know.
  */
 const McpProtocolOmpCompat = {
-  ...McpProtocol.v2025_06_18,
-  protocolVersion: "2025-03-26",
+  ...McpProtocol.v2025_11_25,
   transport: {
     acceptsJsonRpcBatches: false,
     requiresVersionHeader: false,
@@ -638,11 +642,22 @@ export const DeviceToolkitRegistrationLive = Layer.mergeAll(
   DeviceScreenshotRegistrationLive,
 );
 
+/**
+ * Protocol set served on `/mcp`. Exported so the negotiation contract (omp's
+ * header-less `2025-11-25` dialect plus the header-carrying stock dialects) can
+ * be pinned by a test against this exact list instead of a local copy.
+ */
+export const mcpProtocols: NonNullable<Parameters<typeof McpServer.layerHttp>[0]["protocols"]> = [
+  McpProtocolOmpCompat,
+  McpProtocol.v2025_06_18,
+  McpProtocol.v2025_03_26,
+];
+
 const McpTransportLive = McpServer.layerHttp({
   name: "T3 Code",
   version: packageJson.version,
   path: "/mcp",
-  protocols: [McpProtocolOmpCompat, McpProtocol.v2025_06_18],
+  protocols: mcpProtocols,
 }).pipe(Layer.provide(McpAuthMiddlewareLive));
 
 export const layer = Layer.mergeAll(

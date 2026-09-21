@@ -621,6 +621,66 @@ it.effect("terminates HTTP MCP sessions with DELETE", () =>
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
+it.effect("serves omp's header-less 2025-11-25 dialect beside the stock dialects", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const serverLayer = McpServer.layerHttp({
+        name: "MCP protocol negotiation test",
+        version: "1.0.0",
+        path: "/mcp",
+        protocols: McpHttpServer.mcpProtocols,
+      });
+      yield* HttpRouter.serve(serverLayer, {
+        disableListenLog: true,
+        disableLogger: true,
+      }).pipe(Layer.build);
+      const httpClient = yield* HttpClient.HttpClient;
+
+      // omp offers 2025-11-25 during initialize and omits MCP-Protocol-Version
+      // on every later request; a 500 here (unknown version) or a 400 on the
+      // follow-up (header enforcement) aborts the whole omp ACP session.
+      const initializeResponse = yield* httpClient.post("/mcp", {
+        headers: { accept: "application/json, text/event-stream" },
+        body: HttpBody.text(
+          `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{"roots":{"listChanged":false}},"clientInfo":{"name":"omp-coding-agent","version":"1.0.0"}}}`,
+          "application/json",
+        ),
+      });
+      expect(initializeResponse.status).toBe(200);
+      const initializeBody = yield* initializeResponse.text;
+      expect(initializeBody).toContain('"protocolVersion":"2025-11-25"');
+      const sessionId = initializeResponse.headers["mcp-session-id"];
+      expect(sessionId).not.toBeNull();
+
+      const followUpResponse = yield* httpClient.post("/mcp", {
+        headers: {
+          accept: "application/json, text/event-stream",
+          "mcp-session-id": sessionId!,
+        },
+        body: HttpBody.text(
+          `{"jsonrpc":"2.0","method":"notifications/initialized"}`,
+          "application/json",
+        ),
+      });
+      expect(followUpResponse.status).toBe(202);
+
+      // Stock clients that negotiate 2025-06-18 and send its header still work.
+      const stockResponse = yield* httpClient.post("/mcp", {
+        headers: {
+          accept: "application/json, text/event-stream",
+          "mcp-protocol-version": "2025-06-18",
+        },
+        body: HttpBody.text(
+          `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"mcp-test","version":"1.0.0"}}}`,
+          "application/json",
+        ),
+      });
+      expect(stockResponse.status).toBe(200);
+      expect(yield* stockResponse.text).toContain('"protocolVersion":"2025-06-18"');
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
 it.effect("registers annotated tools and preserves authenticated request context", () =>
   Effect.scoped(
     Effect.gen(function* () {
