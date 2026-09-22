@@ -18,6 +18,7 @@ import { createModelCapabilities } from "@t3tools/shared/model";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 
 import {
+  buildSelectOptionDescriptor,
   buildServerProvider,
   isCommandMissingCause,
   parseGenericCliVersion,
@@ -49,6 +50,13 @@ const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({
 const VERSION_PROBE_TIMEOUT_MS = 4_000;
 const OMP_ACP_MODEL_DISCOVERY_TIMEOUT_MS = 15_000;
 
+const OMP_MODEL_DISPLAY_NAMES: Record<string, string> = {
+  "opencode-go/deepseek-v4-flash": "DeepSeek V4 Flash",
+  "opencode-go/deepseek-v4.1-flash": "DeepSeek V4.1 Flash",
+  "opencode-go/ox-alpha-free": "Ox Alpha Free",
+  "opencode-zen/x-preview-f-free": "Ox Alpha Free",
+};
+
 const OMP_BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
   {
     slug: "opencode-go/deepseek-v4-flash",
@@ -56,7 +64,28 @@ const OMP_BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
     isCustom: false,
     capabilities: EMPTY_CAPABILITIES,
   },
+  {
+    slug: "opencode-zen/x-preview-f-free",
+    name: "Ox Alpha Free",
+    isCustom: false,
+    capabilities: EMPTY_CAPABILITIES,
+  },
+  {
+    slug: "opencode-go/ox-alpha-free",
+    name: "Ox Alpha Free",
+    isCustom: false,
+    capabilities: EMPTY_CAPABILITIES,
+  },
 ];
+
+function displayNameForOmpModel(slug: string, fallback: string | null | undefined): string {
+  const known = OMP_MODEL_DISPLAY_NAMES[slug];
+  if (known) {
+    return known;
+  }
+  const trimmed = (fallback ?? "").trim();
+  return trimmed || slug;
+}
 
 export function buildInitialOmpProviderSnapshot(
   ompSettings: OmpSettings,
@@ -100,17 +129,52 @@ export function buildInitialOmpProviderSnapshot(
 function ompModelsFromSettings(
   customModels: ReadonlyArray<string> | undefined,
   builtInModels: ReadonlyArray<ServerProviderModel> = OMP_BUILT_IN_MODELS,
+  customModelCapabilities: ModelCapabilities = EMPTY_CAPABILITIES,
 ): ReadonlyArray<ServerProviderModel> {
-  return providerModelsFromSettings(builtInModels, customModels ?? [], EMPTY_CAPABILITIES);
+  return providerModelsFromSettings(builtInModels, customModels ?? [], customModelCapabilities);
 }
 
-function buildOmpDiscoveredModelsFromSessionSetup(
+export function buildOmpModelCapabilitiesFromSessionSetup(
+  sessionSetupResult:
+    | EffectAcpSchema.LoadSessionResponse
+    | EffectAcpSchema.NewSessionResponse
+    | EffectAcpSchema.ResumeSessionResponse,
+): ModelCapabilities {
+  const thoughtLevelOption = sessionSetupResult.configOptions?.find(
+    (configOption) =>
+      configOption.category === "thought_level" && isSelectSessionConfigOption(configOption),
+  );
+  if (!isSelectSessionConfigOption(thoughtLevelOption)) {
+    return EMPTY_CAPABILITIES;
+  }
+
+  const options = thoughtLevelOption.options.flatMap((entry) =>
+    "value" in entry ? [entry] : entry.options,
+  );
+  return createModelCapabilities({
+    optionDescriptors: [
+      buildSelectOptionDescriptor({
+        id: thoughtLevelOption.id,
+        label: thoughtLevelOption.name,
+        options: options.map((option) => ({
+          value: option.value,
+          label: option.name,
+          ...(option.value === thoughtLevelOption.currentValue ? { isDefault: true } : {}),
+        })),
+      }),
+    ],
+  });
+}
+
+export function buildOmpDiscoveredModelsFromSessionSetup(
   sessionSetupResult:
     | EffectAcpSchema.LoadSessionResponse
     | EffectAcpSchema.NewSessionResponse
     | EffectAcpSchema.ResumeSessionResponse,
 ): ReadonlyArray<ServerProviderModel> {
+  const modelCapabilities = buildOmpModelCapabilitiesFromSessionSetup(sessionSetupResult);
   const seen = new Set<string>();
+  const models: Array<ServerProviderModel> = [];
   const push = (rawId: string | null | undefined, name: string | null | undefined) => {
     const slug = resolveOmpAcpBaseModelId(rawId);
     if (!slug || seen.has(slug)) {
@@ -119,12 +183,11 @@ function buildOmpDiscoveredModelsFromSessionSetup(
     seen.add(slug);
     models.push({
       slug,
-      name: (name ?? "").trim() || slug,
+      name: displayNameForOmpModel(slug, name),
       isCustom: false,
-      capabilities: EMPTY_CAPABILITIES,
+      capabilities: modelCapabilities,
     });
   };
-  const models: Array<ServerProviderModel> = [];
 
   // OMP's ACP implementation negotiates the model through the `model`
   // configuration option (`category: "model"`, `type: "select"`), with the
@@ -320,7 +383,11 @@ export const checkOmpProviderStatus = Effect.fn("checkOmpProviderStatus")(functi
   const discoveredModels = discoveryExit.value.value;
   const models =
     discoveredModels.length > 0
-      ? ompModelsFromSettings(ompSettings.customModels, discoveredModels)
+      ? ompModelsFromSettings(
+          ompSettings.customModels,
+          discoveredModels,
+          discoveredModels[0]?.capabilities ?? EMPTY_CAPABILITIES,
+        )
       : fallbackModels;
 
   return buildServerProvider({

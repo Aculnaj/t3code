@@ -11,6 +11,8 @@ import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Logger from "effect/Logger";
+import * as References from "effect/References";
 import { TestClock } from "effect/testing";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
@@ -412,6 +414,74 @@ describe("VcsProcess.run", () => {
       });
       expect(error.message).not.toContain(providerStderr);
     }).pipe(provideLive),
+  );
+
+  it.effect("logs a sanitized stderr snippet for command failures", () =>
+    Effect.gen(function* () {
+      const logs: Array<{ message: unknown; annotations: Record<string, unknown> }> = [];
+      const logger = Logger.make(({ fiber, message }) => {
+        logs.push({
+          message,
+          annotations: fiber.getRef(References.CurrentLogAnnotations),
+        });
+      });
+      const secretStderr = "could not create pull request: token ghp_1234567890abcdefghijklmn";
+      const error = yield* run({
+        operation: "test.exit",
+        command: "node",
+        args: ["-e", "process.stderr.write(process.argv[1]); process.exit(1)", secretStderr],
+        cwd: process.cwd(),
+      }).pipe(
+        Effect.flip,
+        Effect.provide(
+          liveLayer.pipe(Layer.merge(Logger.layer([logger], { mergeWithExisting: false }))),
+        ),
+      );
+
+      expect(error).toBeInstanceOf(VcsProcessExitError);
+      const warning = logs.find(
+        (entry) =>
+          Array.isArray(entry.message) &&
+          entry.message.includes("VCS process exited with a non-zero status"),
+      );
+      expect(warning).toBeDefined();
+      const stderr = String(warning?.annotations.stderr);
+      expect(stderr).toContain("could not create pull request");
+      expect(stderr).not.toContain("ghp_1234567890abcdefghijklmn");
+      expect(warning?.annotations.exitCode).toBe(1);
+      expect(warning?.annotations.failureKind).toBe("command-failed");
+    }),
+  );
+
+  it.effect("does not log stderr for authentication failures", () =>
+    Effect.gen(function* () {
+      const logs: Array<{ message: unknown }> = [];
+      const logger = Logger.make(({ message }) => {
+        logs.push({ message });
+      });
+      yield* run({
+        operation: "test.authentication",
+        command: "node",
+        args: [
+          "-e",
+          "process.stderr.write('authentication failed for token super-secret-token'); process.exit(1)",
+        ],
+        cwd: process.cwd(),
+      }).pipe(
+        Effect.flip,
+        Effect.provide(
+          liveLayer.pipe(Layer.merge(Logger.layer([logger], { mergeWithExisting: false }))),
+        ),
+      );
+
+      expect(
+        logs.some(
+          (entry) =>
+            Array.isArray(entry.message) &&
+            entry.message.includes("VCS process exited with a non-zero status"),
+        ),
+      ).toBe(false);
+    }),
   );
 
   it.effect("retains spawn causes without exposing process arguments in the error message", () =>

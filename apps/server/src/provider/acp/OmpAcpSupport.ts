@@ -1,5 +1,10 @@
-import { type OmpSettings, ProviderDriverKind } from "@t3tools/contracts";
+import {
+  type OmpSettings,
+  ProviderDriverKind,
+  type ProviderOptionSelection,
+} from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Scope from "effect/Scope";
@@ -52,6 +57,10 @@ export const makeOmpAcpRuntime = (
         ...input,
         spawn: buildOmpAcpSpawnInput(input.ompSettings, input.cwd, input.environment),
         authMethodId: OMP_ACP_AUTH_METHOD,
+        // omp abort() + subagent teardown can take the full 5s cleanup window.
+        // Wait for session/prompt to settle after session/cancel so the next
+        // turn does not overlap abort and make omp close the ACP session.
+        cancelWait: Duration.seconds(8),
       }).pipe(
         Layer.provide(
           Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, input.childProcessSpawner),
@@ -94,17 +103,41 @@ export function currentOmpModelIdFromSessionSetup(
 }
 
 export function applyOmpAcpModelSelection<E>(input: {
-  readonly runtime: Pick<AcpSessionRuntime.AcpSessionRuntime["Service"], "setModel">;
+  readonly runtime: Pick<
+    AcpSessionRuntime.AcpSessionRuntime["Service"],
+    "getConfigOptions" | "setConfigOption" | "setModel"
+  >;
   readonly currentModelId: string | undefined;
   readonly requestedModelId: string | undefined;
-  readonly mapError: (cause: EffectAcpErrors.AcpError) => E;
+  readonly selections?: ReadonlyArray<ProviderOptionSelection> | null | undefined;
+  readonly mapError: (context: {
+    readonly cause: EffectAcpErrors.AcpError;
+    readonly method: "session/set_config_option" | "session/set_model";
+  }) => E;
 }): Effect.Effect<string | undefined, E> {
   const shouldSwitchModel =
     input.requestedModelId !== undefined && input.requestedModelId !== input.currentModelId;
-  if (!shouldSwitchModel) {
-    return Effect.succeed(input.currentModelId);
-  }
-  return input.runtime
-    .setModel(input.requestedModelId)
-    .pipe(Effect.mapError(input.mapError), Effect.as(input.requestedModelId));
+  const applyModel = shouldSwitchModel
+    ? input.runtime
+        .setModel(input.requestedModelId!)
+        .pipe(Effect.mapError((cause) => input.mapError({ cause, method: "session/set_model" })))
+    : Effect.void;
+
+  return Effect.gen(function* () {
+    yield* applyModel;
+    const configOptions = yield* input.runtime.getConfigOptions;
+    for (const selection of input.selections ?? []) {
+      if (!configOptions.some((option) => option.id === selection.id)) {
+        continue;
+      }
+      yield* input.runtime
+        .setConfigOption(selection.id, selection.value)
+        .pipe(
+          Effect.mapError((cause) =>
+            input.mapError({ cause, method: "session/set_config_option" }),
+          ),
+        );
+    }
+    return shouldSwitchModel ? input.requestedModelId : input.currentModelId;
+  });
 }

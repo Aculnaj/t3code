@@ -315,6 +315,44 @@ describe("AcpRuntimeModel", () => {
     }
   });
 
+  it("passes OMP task spawn args through in raw tool input", () => {
+    const created = parseSessionUpdateEvent({
+      sessionId: "session-1",
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: "call-task",
+        title: "Dispatching skill-fix and auth-hardening agents",
+        kind: "other",
+        status: "pending",
+        rawInput: {
+          context: "Two independent strands.",
+          tasks: [
+            { name: "SkillDriftFix", agent: "task", task: "Clean skill drift." },
+            { name: "AuthHardening", agent: "scout", task: "Harden auth." },
+          ],
+          ignoredBlob: "x".repeat(1000),
+        },
+      },
+    } satisfies EffectAcpSchema.SessionNotification);
+
+    expect(created.events).toHaveLength(1);
+    const event = created.events[0];
+    expect(event?._tag).toBe("ToolCallUpdated");
+    if (event?._tag === "ToolCallUpdated") {
+      expect(event.toolCall.detail).toBeUndefined();
+      expect(event.toolCall.data.rawInput).toMatchObject({
+        context: "Two independent strands.",
+        tasks: [
+          { name: "SkillDriftFix", agent: "task", task: "Clean skill drift." },
+          { name: "AuthHardening", agent: "scout", task: "Harden auth." },
+        ],
+      });
+      expect((event.toolCall.data.rawInput as Record<string, unknown>).ignoredBlob).toBe(
+        "x".repeat(1000),
+      );
+    }
+  });
+
   it("trims padded current mode updates before emitting a mode change", () => {
     const result = parseSessionUpdateEvent({
       sessionId: "session-1",

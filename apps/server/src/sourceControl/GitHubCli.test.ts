@@ -9,7 +9,11 @@ import * as PlatformError from "effect/PlatformError";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import { ChildProcessSpawner } from "effect/unstable/process";
-import { VcsProcessExitError, VcsProcessSpawnError } from "@t3tools/contracts";
+import {
+  VcsProcessExitError,
+  VcsProcessSpawnError,
+  VcsProcessTimeoutError,
+} from "@t3tools/contracts";
 
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as GitHubCli from "./GitHubCli.ts";
@@ -262,6 +266,38 @@ describe("GitHubCli.layer", () => {
     assert.equal(commandFailure._tag, "GitHubCliCommandError");
     assert.strictEqual(commandFailure.cause, missingCwd);
     assert.notProperty(commandFailure, "operation");
+  });
+
+  it("includes the exit code in the generic command-failure detail", () => {
+    const cause = new VcsProcessExitError({
+      operation: "GitHubCli.execute",
+      command: "gh",
+      cwd: "/repo",
+      exitCode: 2,
+      detail: "Process exited with a non-zero status.",
+      failureKind: "command-failed",
+      stderrLength: 0,
+    });
+
+    const commandFailure = GitHubCli.fromVcsError({ command: "gh", cwd: "/repo" }, cause);
+
+    assert.equal(commandFailure._tag, "GitHubCliCommandError");
+    assert.strictEqual(commandFailure.cause, cause);
+    assert.equal(commandFailure.detail, "GitHub CLI command failed (exit 2).");
+  });
+
+  it("reports timeouts distinctly instead of the generic command failure", () => {
+    const cause = new VcsProcessTimeoutError({
+      operation: "GitHubCli.execute",
+      command: "gh",
+      cwd: "/repo",
+      timeoutMs: 30_000,
+    });
+
+    const commandFailure = GitHubCli.fromVcsError({ command: "gh", cwd: "/repo" }, cause);
+
+    assert.equal(commandFailure._tag, "GitHubCliCommandError");
+    assert.equal(commandFailure.detail, "GitHub CLI command timed out after 30000ms.");
   });
 
   it.effect("parses pull request view output", () =>

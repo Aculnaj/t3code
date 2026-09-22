@@ -87,10 +87,10 @@ export const makeOmpTextGeneration = Effect.fn("makeOmpTextGeneration")(function
           runtime,
           currentModelId: currentOmpModelIdFromSessionSetup(started.sessionSetupResult),
           requestedModelId: resolvedModel,
-          mapError: (cause) =>
+          mapError: ({ cause }) =>
             new TextGenerationError({
               operation,
-              detail: "Failed to set OMP ACP base model for text generation.",
+              detail: "Failed to set OMP ACP model configuration for text generation.",
               cause,
             }),
         });

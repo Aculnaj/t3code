@@ -8,6 +8,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   RuntimeRequestId,
+  RuntimeTaskId,
   type ThreadId,
   TurnId,
 } from "@t3tools/contracts";
@@ -58,6 +59,12 @@ import {
   makeOmpAcpRuntime,
   resolveOmpAcpBaseModelId,
 } from "../acp/OmpAcpSupport.ts";
+import {
+  extractOmpAcpToolFields,
+  projectOmpOpenTasksTerminal,
+  projectOmpTaskToolCall,
+  type OmpTaskRuntimeEvent,
+} from "../acp/OmpTaskProjection.ts";
 import { type OmpAdapterShape } from "../Services/OmpAdapter.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 
@@ -101,6 +108,10 @@ interface OmpSessionContext {
   promptsInFlight: number;
   currentModelId: string | undefined;
   stopped: boolean;
+  /** toolCallId → subagent task ids already started for that OMP task tool. */
+  ompTaskIdsByToolCall: Map<string, string[]>;
+  /** toolCallId → original OMP task spawn args (later updates omit rawInput). */
+  ompTaskRawInputByToolCall: Map<string, unknown>;
 }
 
 function settlePendingApprovalsAsCancelled(
@@ -434,6 +445,117 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
         ),
       );
 
+    const emitOmpTaskRuntimeEvents = (
+      threadId: ThreadId,
+      turnId: TurnId,
+      events: ReadonlyArray<OmpTaskRuntimeEvent>,
+    ) =>
+      Effect.forEach(
+        events,
+        (event) =>
+          Effect.gen(function* () {
+            const stamp = yield* makeEventStamp();
+            const taskId = RuntimeTaskId.make(event.taskId);
+            const linkage = {
+              title: event.title,
+              role: event.role,
+              taskType: "local_agent",
+              ...(event.model ? { model: event.model } : {}),
+              ...(event.toolUseId ? { toolUseId: event.toolUseId } : {}),
+              timelineBypass: true as const,
+            };
+            if (event.type === "task.started") {
+              yield* offerRuntimeEvent({
+                type: "task.started",
+                ...stamp,
+                provider: PROVIDER,
+                threadId,
+                turnId,
+                payload: {
+                  taskId,
+                  description: event.description,
+                  ...linkage,
+                },
+              });
+              return;
+            }
+            if (event.type === "task.progress") {
+              yield* offerRuntimeEvent({
+                type: "task.progress",
+                ...stamp,
+                provider: PROVIDER,
+                threadId,
+                turnId,
+                payload: {
+                  taskId,
+                  description: event.description,
+                  ...(event.summary ? { summary: event.summary } : {}),
+                  ...(event.status ? { status: event.status } : {}),
+                  ...(event.lastToolName ? { lastToolName: event.lastToolName } : {}),
+                  ...linkage,
+                },
+              });
+              return;
+            }
+            if (event.type === "task.updated") {
+              yield* offerRuntimeEvent({
+                type: "task.updated",
+                ...stamp,
+                provider: PROVIDER,
+                threadId,
+                turnId,
+                payload: {
+                  taskId,
+                  ...(event.status ? { status: event.status } : {}),
+                  ...linkage,
+                },
+              });
+              return;
+            }
+            yield* offerRuntimeEvent({
+              type: "task.completed",
+              ...stamp,
+              provider: PROVIDER,
+              threadId,
+              turnId,
+              payload: {
+                taskId,
+                status: event.completedStatus ?? "completed",
+                ...(event.summary ? { summary: event.summary } : {}),
+                ...linkage,
+              },
+            });
+          }),
+        { discard: true },
+      );
+
+    const finalizeOmpOpenTasks = (
+      ctx: OmpSessionContext,
+      turnId: TurnId,
+      completedStatus: "completed" | "failed" | "stopped",
+    ) =>
+      Effect.gen(function* () {
+        const open = Array.from(ctx.ompTaskIdsByToolCall.entries());
+        if (open.length === 0) {
+          return;
+        }
+        ctx.ompTaskIdsByToolCall.clear();
+        yield* Effect.forEach(
+          open,
+          ([toolCallId, taskIds]) => {
+            const rawInput = ctx.ompTaskRawInputByToolCall.get(toolCallId);
+            const projected = projectOmpOpenTasksTerminal({
+              toolCallId,
+              taskIds,
+              ...(rawInput !== undefined ? { rawInput } : {}),
+              completedStatus,
+            });
+            return emitOmpTaskRuntimeEvents(ctx.threadId, turnId, projected.events);
+          },
+          { discard: true },
+        );
+      });
+
     const emitPlanUpdate = (
       ctx: OmpSessionContext,
       turnId: TurnId | undefined,
@@ -659,8 +781,9 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
             runtime: acp,
             currentModelId: currentOmpModelIdFromSessionSetup(started.sessionSetupResult),
             requestedModelId: requestedStartModelId,
-            mapError: (cause) =>
-              mapAcpToAdapterError(PROVIDER, input.threadId, "session/set_model", cause),
+            selections: ompModelSelection?.options,
+            mapError: ({ cause, method }) =>
+              mapAcpToAdapterError(PROVIDER, input.threadId, method, cause),
           });
 
           const now = yield* nowIso;
@@ -695,6 +818,8 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
             promptsInFlight: 0,
             currentModelId: boundModelId,
             stopped: false,
+            ompTaskIdsByToolCall: new Map(),
+            ompTaskRawInputByToolCall: new Map(),
           };
 
           const nf = yield* Stream.runDrain(
@@ -760,7 +885,7 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
                       "session/update",
                     );
                     return;
-                  case "ToolCallUpdated":
+                  case "ToolCallUpdated": {
                     yield* offerRuntimeEvent(
                       makeAcpToolCallEvent({
                         stamp,
@@ -771,7 +896,45 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
                         rawPayload: event.rawPayload,
                       }),
                     );
+                    const fields = extractOmpAcpToolFields(event.rawPayload);
+                    const toolCallId = fields.toolCallId ?? event.toolCall.toolCallId;
+                    if (fields.rawInput !== undefined) {
+                      ctx.ompTaskRawInputByToolCall.set(toolCallId, fields.rawInput);
+                    }
+                    const knownTaskIds = ctx.ompTaskIdsByToolCall.get(toolCallId);
+                    const rememberedRawInput = ctx.ompTaskRawInputByToolCall.get(toolCallId);
+                    const rawInput =
+                      fields.rawInput ?? rememberedRawInput ?? event.toolCall.data.rawInput;
+                    const projected = projectOmpTaskToolCall({
+                      toolCallId,
+                      ...((fields.title ?? event.toolCall.title)
+                        ? { title: fields.title ?? event.toolCall.title }
+                        : {}),
+                      ...((fields.kind ?? event.toolCall.kind)
+                        ? { kind: fields.kind ?? event.toolCall.kind }
+                        : {}),
+                      ...((fields.status ?? event.toolCall.status)
+                        ? { status: fields.status ?? event.toolCall.status }
+                        : {}),
+                      ...(rawInput !== undefined ? { rawInput } : {}),
+                      ...(fields.rawOutput !== undefined ||
+                      event.toolCall.data.rawOutput !== undefined
+                        ? { rawOutput: fields.rawOutput ?? event.toolCall.data.rawOutput }
+                        : {}),
+                      ...(knownTaskIds ? { knownTaskIds } : {}),
+                    });
+                    if (projected.taskIds.length > 0) {
+                      ctx.ompTaskIdsByToolCall.set(toolCallId, [...projected.taskIds]);
+                    }
+                    if (projected.events.length > 0) {
+                      yield* emitOmpTaskRuntimeEvents(
+                        ctx.threadId,
+                        notificationTurnId,
+                        projected.events,
+                      );
+                    }
                     return;
+                  }
                   case "ContentDelta":
                     yield* offerRuntimeEvent(
                       makeAcpContentDeltaEvent({
@@ -862,8 +1025,9 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
                 runtime: ctx.acp,
                 currentModelId: ctx.currentModelId,
                 requestedModelId: requestedTurnModelId,
-                mapError: (cause) =>
-                  mapAcpToAdapterError(PROVIDER, input.threadId, "session/set_model", cause),
+                selections: turnModelSelection?.options,
+                mapError: ({ cause, method }) =>
+                  mapAcpToAdapterError(PROVIDER, input.threadId, method, cause),
               });
 
               const text = input.input?.trim();
@@ -1106,6 +1270,9 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
                     stopReason: completedStopReason,
                   },
                 });
+                if (result.stopReason === "cancelled") {
+                  yield* finalizeOmpOpenTasks(ctx, prepared.turnId, "stopped");
+                }
                 ctx.interruptedTurnIds.delete(prepared.turnId);
                 yield* Ref.set(promptSettled, true);
               } else if (remainingPrompts > 0) {
@@ -1163,14 +1330,18 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
                       prepared.promptParts,
                       promptResult,
                     );
+                    const completedStopReason = completedStopReasonFromPromptResponse(promptResult);
                     yield* settlePromptInFlight(
                       input.threadId,
                       prepared.turnId,
                       prepared.acpSessionId,
                       {
-                        completedStopReason: completedStopReasonFromPromptResponse(promptResult),
+                        completedStopReason,
                       },
                     );
+                    if (completedStopReason === "cancelled") {
+                      yield* finalizeOmpOpenTasks(ctx, prepared.turnId, "stopped");
+                    }
                   }),
                 );
                 return;
@@ -1179,8 +1350,19 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
               const errorMessage = yield* Ref.get(promptFailureMessageRef);
               yield* withThreadLock(
                 input.threadId,
-                settlePromptInFlight(input.threadId, prepared.turnId, prepared.acpSessionId, {
-                  errorMessage: errorMessage ?? "OMP prompt request failed.",
+                Effect.gen(function* () {
+                  yield* settlePromptInFlight(
+                    input.threadId,
+                    prepared.turnId,
+                    prepared.acpSessionId,
+                    {
+                      errorMessage: errorMessage ?? "OMP prompt request failed.",
+                    },
+                  );
+                  const ctx = sessions.get(input.threadId);
+                  if (ctx) {
+                    yield* finalizeOmpOpenTasks(ctx, prepared.turnId, "stopped");
+                  }
                 }),
               );
             }).pipe(Effect.catch(() => Effect.void)),
@@ -1251,6 +1433,7 @@ export function makeOmpAdapter(ompSettings: OmpSettings, options?: OmpAdapterLiv
                 completedStopReason: "cancelled",
                 settleAllPrompts: true,
               });
+              yield* finalizeOmpOpenTasks(ctx, interruptedTurnId, "stopped");
             } else if (
               ctx.promptsInFlight > 0 ||
               ctx.session.status === "running" ||

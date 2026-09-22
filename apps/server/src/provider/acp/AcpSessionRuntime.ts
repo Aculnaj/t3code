@@ -111,6 +111,13 @@ export interface AcpSessionRuntimeOptions {
     readonly logOutgoing?: boolean;
     readonly logger?: (event: EffectAcpProtocol.AcpProtocolLogEvent) => Effect.Effect<void, never>;
   };
+  /**
+   * When set, `cancel` sends `session/cancel` first and waits this long for
+   * the in-flight `session/prompt` RPC to resolve. OMP's ACP agent closes the
+   * whole session if a new prompt arrives while abort() is still running
+   * (5s cleanup timeout). Grok/Cursor keep the default interrupt-first path.
+   */
+  readonly cancelWait?: Duration.Input;
 }
 
 export interface AcpSessionRequestLogEvent {

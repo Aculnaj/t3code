@@ -61,6 +61,20 @@ const VCS_PROCESS_CONCURRENCY = 8;
 const GITHUB_PROCESS_CONCURRENCY = 4;
 
 export const CHECKPOINT_CAPTURE_OPERATION = "GitVcsDriver.checkpoints.captureCheckpoint";
+const MAX_STDERR_LOG_CHARS = 2_000;
+const STDERR_REDACTED_MARKER = "[redacted]";
+
+/**
+ * Best-effort redaction for server-side stderr diagnostics. VCS failures never
+ * carry stderr across the wire (only its length), so this only guards what
+ * lands in the journal: token-bearing URLs, `--token=...` echoes, and
+ * `key=value` credential lines.
+ */
+const redactSecrets = (text: string): string =>
+  text.replace(
+    /(gh[pousr]_[A-Za-z0-9]{10,}|github_pat_[A-Za-z0-9_]{20,}|(?:token|secret|password|authorization|api[_-]?key)\s*[:=]\s*[^\s"']+)/gi,
+    STDERR_REDACTED_MARKER,
+  );
 
 const classifyNonZeroExit = (command: string, stderr: string): VcsProcessExitFailureKind => {
   const normalized = stderr.toLowerCase();
@@ -142,6 +156,18 @@ export const make = Effect.gen(function* () {
         timeoutBehavior: "error",
       })
       .pipe(
+        Effect.tapError((error) =>
+          error._tag === "ProcessTimeoutError"
+            ? Effect.logWarning("VCS process timed out").pipe(
+                Effect.annotateLogs({
+                  operation: input.operation,
+                  command: input.command,
+                  cwd: input.cwd,
+                  timeoutMs: error.timeoutMs,
+                }),
+              )
+            : Effect.void,
+        ),
         Effect.mapError(
           Match.valueTags({
             ProcessSpawnError: (error) =>
@@ -177,6 +203,23 @@ export const make = Effect.gen(function* () {
 
     if (!input.allowNonZeroExit && result.code !== 0) {
       const failureKind = classifyNonZeroExit(input.command, result.stderr);
+      // Authentication stderr may echo credentials; never retain or log it.
+      // Every other failure gets a sanitized stderr snippet in the journal so
+      // the real CLI error survives for diagnosis (the wire error keeps only
+      // stderrLength by design).
+      if (failureKind !== "authentication") {
+        yield* Effect.logWarning("VCS process exited with a non-zero status").pipe(
+          Effect.annotateLogs({
+            operation: input.operation,
+            command: input.command,
+            cwd: input.cwd,
+            exitCode: result.code,
+            failureKind,
+            stderr: redactSecrets(result.stderr).slice(0, MAX_STDERR_LOG_CHARS),
+            stderrTruncated: result.stderrTruncated,
+          }),
+        );
+      }
       return yield* VcsProcessExitError.fromProcessExit(
         baseError,
         {

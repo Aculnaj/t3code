@@ -13,6 +13,8 @@ import * as Schema from "effect/Schema";
 
 import {
   TrimmedNonEmptyString,
+  VcsProcessExitError,
+  VcsProcessTimeoutError,
   type SourceControlRepositoryVisibility,
   type VcsError,
 } from "@t3tools/contracts";
@@ -75,6 +77,7 @@ function targetsVerifiedHost(args: ReadonlyArray<string>, host: string): boolean
 const gitHubCliFailureFields = {
   command: Schema.Literal("gh"),
   cwd: Schema.String,
+  detailOverride: Schema.optional(Schema.String),
   cause: Schema.Defect(),
 } as const;
 
@@ -135,7 +138,7 @@ export class GitHubCliCommandError extends Schema.TaggedError<GitHubCliCommandEr
   gitHubCliFailureFields,
 ) {
   get detail(): string {
-    return "GitHub CLI command failed.";
+    return this.detailOverride ?? "GitHub CLI command failed.";
   }
 
   override get message(): string {
@@ -243,6 +246,19 @@ export function fromVcsError(
     if (error.failureKind === "not-found") {
       return new GitHubPullRequestNotFoundError({ ...context, cause: error });
     }
+    return new GitHubCliCommandError({
+      ...context,
+      detailOverride: `GitHub CLI command failed (exit ${error.exitCode}).`,
+      cause: error,
+    });
+  }
+
+  if (error._tag === "VcsProcessTimeoutError") {
+    return new GitHubCliCommandError({
+      ...context,
+      detailOverride: `GitHub CLI command timed out after ${error.timeoutMs}ms.`,
+      cause: error,
+    });
   }
 
   return new GitHubCliCommandError({ ...context, cause: error });
